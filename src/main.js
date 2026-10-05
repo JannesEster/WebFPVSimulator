@@ -65,7 +65,7 @@ import { PAD_CALM } from './input/padgate.js';
 import { mountTouchSticks, touchWanted } from './input/touchsticks.js';
 import { RcLink, LINK_DEFAULT, LINK_PRESETS } from './input/link.js';
 import { FlightRecorder, downloadText, flightLogName } from './share/flightlog.js';
-import { RateSession, fitRates } from './fc/ratemyrates.js';
+import { PASS_LIMIT, RateCoach } from './fc/ratemyrates.js';
 import { PRACTICE_LAPS, Race, runComplete } from './game/race.js';
 import { TrickDetector } from './game/trickdetect.js';
 import { deriveObstacles, OB_BAR, OB_POLE } from './game/obstacles.js';
@@ -115,7 +115,7 @@ import { MAP_PRELOAD } from './maps/preload.js';
 import { TUNES, tuneById, tunePath } from '../configs/registry.js';
 import { airframeById, simIdFor } from '../configs/airframes.js';
 import { buildWhoopCraft } from './render/whoopcraft.js';
-import { hoverStickPercent, normaliseRates, ratesAreDefault, ratesDiff, ratesSummary, TOUCH_RATE_DEFAULTS } from '../configs/rates.js';
+import { hoverStickPercent, normaliseRates, ratesAreDefault, ratesDiff, ratesShort, ratesSummary, TOUCH_RATE_DEFAULTS } from '../configs/rates.js';
 import { clearPidsFor, PID_AXES, pidCliKey, pidsDiffFor, SLIDER_KEYS, SLIDERS } from '../configs/pids.js';
 import { cliMap, composeConfig, moduleDump, moduleGet, RATES_KEEP, ratesFromDump, readFcDump, tuneBody, writeFcDump } from './fc/dump.js';
 import { GATE_SCALE } from './game/track.js';
@@ -2681,8 +2681,20 @@ export async function boot({ loading, bootStart, mapId }) {
    * flights. The session knows; it does not reset itself, because a silent
    * restart is a session the pilot thinks they flew.
    */
-  const rateSession = new RateSession(ui.settings.rates);
+  const rateCoach = new RateCoach(ui.settings.rates);
   let rateArmed = false;
+  /*
+   * A FINISHED PASS, WAITING FOR A FRAME BOUNDARY TO BE APPLIED ON.
+   *
+   * The coach notices a pass is full inside the physics block, and applying
+   * rates means sim_init, which resets every parameter group and re-seats
+   * the craft (see the rates branch of applySettings). Doing that halfway
+   * through a frame would invalidate the two states the renderer is about
+   * to interpolate between, so the frame would draw a pop. Flagged here and
+   * handled at the TOP of the next frame, before anything has been stepped
+   * or read, which is the same moment a settings change from a menu lands.
+   */
+  let ratePassReady = false;
   /*
    * Stick samples waiting for an RC slot, and the value currently held.
    *
@@ -5569,9 +5581,18 @@ export async function boot({ loading, bootStart, mapId }) {
     const wantRate = Boolean(ui.measuring);
     if (wantRate !== rateArmed) {
       rateArmed = wantRate;
-      rateSession.reset(s.rates);
-    } else if (rateArmed && rateSession.staleFor(s.rates)) {
-      rateSession.reset(s.rates);
+      rateCoach.reset(s.rates);
+      ratePassReady = false;
+    } else if (rateArmed && !ratePassReady && rateCoach.staleFor(s.rates)) {
+      /*
+       * NOT WHILE A PASS IS WAITING TO BE APPLIED, and the guard is the
+       * whole reason this flag is checked here. Applying a pass IS a rates
+       * change, so it lands in this very branch one frame later: without the
+       * guard the coach would see its own output as the pilot moving a row
+       * under it and throw the run away on every single pass. The run would
+       * never reach pass two.
+       */
+      rateCoach.reset(s.rates);
     }
     audio.setLevel(s.volume / 10);
     audio.setEnabled(s.sound);
@@ -7581,6 +7602,46 @@ export async function boot({ loading, bootStart, mapId }) {
       prevWall = nowWall;
       return;
     }
+    /*
+     * A FINISHED RATE PASS, APPLIED HERE AND NOWHERE ELSE.
+     *
+     * Before anything is stepped or read this frame, because applying it is
+     * a sim_init and a re-seat. See ratePassReady.
+     *
+     * THIS IS THE WHOLE OF THE SELF IMPROVING LOOP, and it is four lines
+     * because the hard parts are elsewhere: the coach decides when a pass
+     * is full and what the next profile is, and the ordinary settings path
+     * does the applying, exactly as it does when a pilot moves a row on the
+     * Rates screen. Nothing new reaches the module and no second way of
+     * writing a rate profile exists.
+     *
+     * WHY CHANGING THE RATES MID FLIGHT IS NOT RUDE HERE, when the Rates
+     * screen warns about it. The pilot pressed a card that exists to retune
+     * them, so the change is the mechanism rather than a surprise, and the
+     * craft keeps its position and attitude across the swap because
+     * reseatAfterConfigSwap already handles that for the menu's own mid-run
+     * changes. They are told each time it happens, the room shows every
+     * pass, and the profile they arrived on is kept so it can be put back.
+     */
+    if (ratePassReady) {
+      const pass = rateCoach.pending();
+      ratePassReady = false;
+      if (pass) {
+        ui.settings.rates = normaliseRates(pass.rates);
+        ui.persistSettings();
+        applySettings(ui.settings);
+        /* What the settings path ACTUALLY put on the quad, which is what the
+         * next pass has to be anchored on. */
+        const report = rateCoach.accept(ui.settings.rates);
+        notice = {
+          text: report
+            ? `Rate my Rates: ${report.why === 'settled' ? 'settled' : 'stopped'} after ${report.passes.length} pass${report.passes.length === 1 ? '' : 'es'}.\n${ratesShort(ui.settings.rates)}`
+            : `Rate my Rates: pass ${pass.pass} of up to ${PASS_LIMIT} applied.\n${ratesShort(ui.settings.rates)}`,
+          untilMs: performance.now() + 4200,
+        };
+        ui.renderMenu();
+      }
+    }
     const blockStart = performance.now();
     const dt = Math.min(nowWall - prevWall, 100);
     prevWall = nowWall;
@@ -8084,8 +8145,8 @@ export async function boot({ loading, bootStart, mapId }) {
          * the occupancy of a centred stick. Replays are out for the same
          * reason: a replay is somebody else's hands.
          */
-        if (rateArmed && !stood && !replayMode && flown > 0) {
-          rateSession.push(
+        if (rateArmed && !ratePassReady && !stood && !replayMode && flown > 0) {
+          rateCoach.push(
             (flown * MS_PER_STEP) / 1000,
             rcHeld,
             {
@@ -8094,6 +8155,9 @@ export async function boot({ loading, bootStart, mapId }) {
               yaw: Math.abs(stateCurr[13]) * RAD_TO_DEG,
             },
           );
+          if (rateCoach.pending()) {
+            ratePassReady = true;
+          }
         }
       }
       /*
@@ -10630,8 +10694,10 @@ export async function boot({ loading, bootStart, mapId }) {
   window.__rateMyRates = () => ({
     armed: rateArmed,
     measuring: Boolean(ui.measuring),
-    seconds: rateSession.seconds,
-    moveSeconds: rateSession.moveSeconds,
+    seconds: rateCoach.session.seconds,
+    moveSeconds: rateCoach.moveSeconds,
+    pass: rateCoach.pass,
+    coachState: rateCoach.state,
     read: ui.rateProbe ? ui.rateProbe() : null,
   });
   /* The ghost, so a capture can ASSERT a chase: what is armed, what the
@@ -11223,15 +11289,19 @@ export async function boot({ loading, bootStart, mapId }) {
    * draw a proposal built out of an empty session.
    */
   ui.setRateProbe(() => {
-    if (rateSession.moveSeconds <= 0) {
-      return null;
-    }
-    const stats = rateSession.stats();
+    const report = rateCoach.report();
+    /* The pass in progress, which is what the room's progress readout and
+     * the title row read. The finished passes are in the report. */
     return {
-      seconds: rateSession.seconds,
-      moveSeconds: rateSession.moveSeconds,
-      stats,
-      fit: fitRates(stats, ui.settings.rates),
+      ...report,
+      armed: rateArmed,
+      moveSeconds: rateCoach.moveSeconds,
+      passProgress: rateCoach.passProgress,
+      passLimit: PASS_LIMIT,
+      /* Live, so a pilot mid pass can see where it is heading rather than
+       * only seeing an answer once the pass fills. Computed on demand in a
+       * screen's render, never per frame. */
+      live: rateCoach.moveSeconds > 0 ? rateCoach.peek() : null,
     };
   });
   ui.setLatencyProbe(() => ({

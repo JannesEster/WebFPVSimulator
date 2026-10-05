@@ -40,7 +40,7 @@
  */
 
 import {
-  RateSession, SESSION_GOOD_S, SESSION_THIN_S, fitRates,
+  PASS_LIMIT, RateCoach, RateSession, SESSION_GOOD_S, SESSION_THIN_S, fitRates,
 } from '../src/fc/ratemyrates.js';
 import {
   RATE_AXES, RATE_DEFAULTS, fullStickDeg, normaliseRates, ratesDiff, ratesShort,
@@ -129,6 +129,30 @@ function fly({
 }
 
 const clampUnit = (v) => (v < 0 ? 0 : (v > 1 ? 1 : v));
+
+/*
+ * The largest relative move between two profiles' endpoints, which is what
+ * the coach's drift ceiling is measured in. Computed here rather than
+ * imported because the module keeps it private, and a check that used the
+ * module's own helper to check the module's own limit would be agreeing
+ * with itself.
+ */
+function moveFrac(before, after) {
+  let worst = 0;
+  for (const axis of RATE_AXES) {
+    const a = normaliseRates(before);
+    const b = normaliseRates(after);
+    const centre = (r) => angleRateDeg(r.type, axisSpec(r, axis), 0.02) / 0.02;
+    const full = (r) => angleRateDeg(r.type, axisSpec(r, axis), 1);
+    for (const read of [centre, full]) {
+      const from = read(a);
+      if (from > 0) {
+        worst = Math.max(worst, Math.abs(read(b) / from - 1));
+      }
+    }
+  }
+  return worst;
+}
 
 function axisSpec(r, axis) {
   const a = r[axis];
@@ -651,6 +675,258 @@ check('one step on one axis is', sess.staleFor(normaliseRates({
   ...STOCK, roll: { ...STOCK.roll, srate: 66 },
 })));
 check('and a different rates system is', sess.staleFor(bfDefault));
+
+/*
+ * ============================================================
+ * THE COACH, AGAINST A PILOT WHOSE HANDS RESPOND TO THE RATES
+ * ============================================================
+ *
+ * EVERY PILOT ABOVE IS OPEN LOOP: a fixed stick program, flown whatever the
+ * profile is. That is the right fixture for testing one fit and it is
+ * useless for testing a loop, because a loop converges by the pilot
+ * CHANGING when the quad does. An open loop pilot flown through six passes
+ * proves nothing about convergence: it would show the fit chasing a stick
+ * program that never reacts, which is not what happens in a cockpit.
+ *
+ * So this pilot has intent instead of a waveform. It wants some rotation
+ * out of a correction and some rotation out of a committed move, and it
+ * pushes the stick as far as THIS profile needs to get them. Give it twice
+ * the slope at centre and its corrections halve, which is exactly the
+ * mechanism the coach's one step convergence argument rests on. The curve
+ * is inverted numerically off the firmware's own transcription, so the
+ * pilot and the fit are reading the same quad.
+ */
+function stickFor(rates, axis, targetDps) {
+  const r = normaliseRates(rates);
+  const spec = axisSpec(r, axis);
+  let lo = 0;
+  let hi = 1;
+  for (let i = 0; i < 40; i += 1) {
+    const mid = (lo + hi) / 2;
+    if (angleRateDeg(r.type, spec, mid) < targetDps) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  return (lo + hi) / 2;
+}
+
+/*
+ * `corrDps` is the rotation this pilot considers a correction and `hardDps`
+ * the rotation it wants when it commits. A sine of amplitude A reverses at
+ * plus and minus A, so its corrections measure 2A of travel: to make a
+ * correction of `corrDps` the stick extreme has to be at stickFor(corrDps),
+ * so the amplitude is half of it.
+ */
+function intentPilot({ corrDps, hardDps }) {
+  return (rates) => {
+    const corrA = {};
+    const hardA = {};
+    for (const axis of RATE_AXES) {
+      corrA[axis] = stickFor(rates, axis, corrDps) / 2;
+      hardA[axis] = Math.min(0.98, stickFor(rates, axis, hardDps));
+    }
+    return (t) => {
+      const hard = (t % 7) > 5.2;
+      const of = (axis, w) => (hard ? hardA[axis] : corrA[axis]) * Math.sin(t * w);
+      return { roll: of('roll', hard ? 2.0 : 6.5), pitch: of('pitch', hard ? 1.7 : 5.3), yaw: of('yaw', hard ? 1.2 : 4.1) };
+    };
+  };
+}
+
+/*
+ * Run the whole loop the way the shell does: fly the pass, hand the fit
+ * back, let the coach anchor the next pass on it. Returns the report.
+ */
+function coachRun(pilot, opening, { hz = 120, ceiling = 2000 } = {}) {
+  const coach = new RateCoach(opening);
+  let guard = 0;
+  for (;;) {
+    guard += 1;
+    if (guard > PASS_LIMIT + 4) {
+      throw new Error('the coach never finished, which is a bug in the coach and not in this harness');
+    }
+    const prog = pilot(coach.flying);
+    const r = normaliseRates(coach.flying);
+    const follow = {};
+    for (const axis of RATE_AXES) {
+      follow[axis] = lagged(ceiling)();
+    }
+    const g = { roll: 0, pitch: 0, yaw: 0 };
+    const dt = 1 / hz;
+    let t = 0;
+    /* Fly until the coach says the pass is full, with a ceiling on wall
+     * clock so a pilot that never moves cannot hang this. */
+    while (!coach.pending() && t < 400) {
+      const stick = prog(t);
+      for (const axis of RATE_AXES) {
+        g[axis] = follow[axis](angleRateDeg(r.type, axisSpec(r, axis), stick[axis]), dt);
+      }
+      coach.push(dt, stick, g);
+      t += dt;
+    }
+    const got = coach.pending();
+    if (!got) {
+      throw new Error('a pass never filled');
+    }
+    const done = coach.accept(got.rates);
+    if (done) {
+      return done;
+    }
+  }
+}
+
+console.log('\n the coach converges on a pilot whose hands respond');
+const settler = intentPilot({ corrDps: 9, hardDps: 520 });
+const run = coachRun(settler, STOCK);
+check('it finishes because it settled, not because it ran out of passes',
+  run.why === 'settled', `${run.why} after ${run.passes.length} pass(es)`);
+/*
+ * It settles on pass two, which is the earliest the loop allows, and that
+ * is only worth asserting alongside pass ONE having actually moved
+ * something: a loop that proposed nothing twice would also "settle on pass
+ * two" and would have converged on nothing at all.
+ *
+ * Two passes is the honest answer for this pilot rather than a suspiciously
+ * quick one. It wants a fixed ROTATION out of a committed move, so what it
+ * reaches barely depends on the rate at the stop, and the fit's fixed point
+ * is "full stick is a seventh above what you actually use". The six pass
+ * limit is sized for the other plausible pilot, the one who commits to a
+ * fixed fraction of travel, whose rate at the stop closes geometrically.
+ */
+check('it settles on pass two, having materially moved the profile on pass one',
+  run.passes.length === 2 && run.passes[0].moved.frac > 0.05,
+  `${run.passes.length} passes, roll ${fullStickDeg(STOCK, 'roll')} to `
+  + `${run.passes.map((p) => fullStickDeg(p.rates, 'roll')).join(' to ')} deg/s, `
+  + `pass one moved ${(run.passes[0].moved.frac * 100).toFixed(0)} percent`);
+check('the last pass moved almost nothing',
+  run.passes[run.passes.length - 1].moved.frac <= 0.06,
+  `${(run.passes[run.passes.length - 1].moved.frac * 100).toFixed(1)} percent`);
+/*
+ * AND THE FIXED POINT IS THE RIGHT ONE. Converging is not enough: it has to
+ * converge on the thing the fit claims to target. Flown once more on the
+ * settled profile, this pilot's corrections must land on CORRECTION_TARGET,
+ * because that is the whole of what the centre fit is for.
+ */
+const settledStats = (() => {
+  const prog = settler(run.rates);
+  return fly({
+    prog, seconds: 120, rates: run.rates, craft: lagged(2000),
+  }).stats();
+})();
+check('and the settled profile puts this pilot\'s corrections on the target',
+  Math.abs(settledStats.roll.correction - 0.10) < 0.025,
+  `median correction ${settledStats.roll.correction.toFixed(3)} of travel against a target of 0.100`);
+check('and its committed moves land near the stop without sitting on it',
+  settledStats.roll.outerShare > 0.05 && settledStats.roll.satShare < 0.25,
+  `${(settledStats.roll.outerShare * 100).toFixed(0)} percent of travel time past seven tenths, `
+  + `${(settledStats.roll.satShare * 100).toFixed(0)} percent on the stop`);
+
+/*
+ * A PILOT ALREADY ON THEIR OWN ANSWER MUST BE LEFT THERE. The worst thing
+ * this loop could do is retune somebody who was right to begin with, so it
+ * is started on the profile it just converged to and must settle at once
+ * and go nowhere.
+ */
+console.log('\n a pilot already on their answer is left alone');
+const again = coachRun(settler, run.rates);
+check('it settles on the earliest pass it is allowed to', again.passes.length === 2,
+  `${again.passes.length} passes`);
+check('and the whole run moved the profile barely at all',
+  again.drift.frac < 0.10,
+  `${(again.drift.frac * 100).toFixed(1)} percent from where it started`);
+
+/*
+ * THE RUNAWAY, which is the case with no fixed point to find.
+ *
+ * A pilot who wants more rotation than any profile will give them is on the
+ * stop every single time, so reach equals the rate at the stop by
+ * definition and both the headroom and the saturation push fire on every
+ * pass. The number climbs for as long as it is allowed to. The loop has to
+ * stop and SAY SO rather than quietly hand over a profile six passes of
+ * compounding away from where the pilot started.
+ */
+console.log('\n a pilot with no fixed point is stopped and told');
+const greedy = intentPilot({ corrDps: 9, hardDps: 4000 });
+const chase = coachRun(greedy, STOCK);
+check('it stops on the limit or the drift ceiling, not on settling',
+  chase.why === 'limit' || chase.why === 'drift', `${chase.why} after ${chase.passes.length} passes`);
+check('and it never drags the profile past the drift ceiling',
+  chase.drift.frac <= 1.5 + 1e-9,
+  `${chase.drift.frac.toFixed(2)} times, ceiling is 1.50 of change`);
+check('while still having moved in the direction the pilot was asking for',
+  fullStickDeg(chase.rates, 'roll') > fullStickDeg(STOCK, 'roll'),
+  `${fullStickDeg(chase.rates, 'roll')} against ${fullStickDeg(STOCK, 'roll')} deg/s`);
+
+/*
+ * AND THE DRIFT CEILING ITSELF, which the run above never reached and so
+ * never tested. Worth knowing: from the Betaflight default a greedy pilot
+ * only gets about 1.15 times over the whole six passes, because reach is
+ * capped both by what the airframe delivers and by the uncommanded rotation
+ * filter, so the pass limit always arrives first. The ceiling is not dead
+ * code, it is just out of range from a profile that is already quick.
+ *
+ * From a SLOW profile it is well in range, and that is the case it is for:
+ * a pilot who starts on 200 deg/s and wants everything. The ceiling is what
+ * stops six passes of compounding handing them something unrecognisable.
+ */
+console.log('\n the drift ceiling catches a run that compounds');
+const slow = normaliseRates({
+  type: 'ACTUAL',
+  roll: { rcRate: 2, srate: 20, expo: 0 },
+  pitch: { rcRate: 2, srate: 20, expo: 0 },
+  yaw: { rcRate: 2, srate: 20, expo: 0 },
+});
+const fromSlow = coachRun(greedy, slow);
+check('a greedy pilot starting slow is stopped by the drift ceiling',
+  fromSlow.why === 'drift', `${fromSlow.why} after ${fromSlow.passes.length} passes`);
+check('and it is stopped before the pass limit, so the ceiling is what stopped it',
+  fromSlow.passes.length < PASS_LIMIT, `${fromSlow.passes.length} passes`);
+check('the profile did grow, and the run never hands over one past the ceiling',
+  fromSlow.drift.frac > 0.2 && fromSlow.drift.frac <= 1.5 + 1e-9,
+  `roll ${fullStickDeg(slow, 'roll')} to ${fullStickDeg(fromSlow.rates, 'roll')} deg/s, `
+  + `${fromSlow.drift.frac.toFixed(2)} of change against a ceiling of 1.50`);
+/*
+ * AND IT SAYS THE PASS WAS REFUSED. A final pass that changed nothing looks
+ * identical to a loop that settled, and the two want opposite things from
+ * the pilot: settling means stop, refusing means fly these and run again.
+ */
+const refusedPass = fromSlow.passes[fromSlow.passes.length - 1];
+check('the refused pass is marked as refused rather than looking like a no-op',
+  refusedPass.refused === true && refusedPass.wanted !== null,
+  `refused ${refusedPass.refused}, it wanted roll `
+  + `${refusedPass.wanted ? fullStickDeg(refusedPass.wanted, 'roll') : 'nothing'} deg/s`);
+check('and every profile the run handed over was inside the ceiling',
+  fromSlow.passes.every((p) => moveFrac(slow, p.rates) <= 1.5 + 1e-9),
+  fromSlow.passes.map((p) => moveFrac(slow, p.rates).toFixed(2)).join(', '));
+
+/*
+ * THE COACH NEVER WRITES THE QUAD, and the shell can decline.
+ */
+console.log('\n the coach waits to be told, and never applies anything itself');
+const held2 = new RateCoach(STOCK);
+const prog2 = settler(STOCK);
+let t2 = 0;
+while (!held2.pending() && t2 < 400) {
+  held2.push(1 / 120, prog2(t2), { roll: 30, pitch: 30, yaw: 30 });
+  t2 += 1 / 120;
+}
+check('a filled pass goes to ready and stops accumulating', held2.state === 'ready');
+check('and the profile it believes is flying has not changed',
+  ratesDiff(held2.flying) === ratesDiff(STOCK));
+const beforeIgnore = held2.moveSeconds;
+held2.push(1 / 120, { roll: 0.5, pitch: 0, yaw: 0 }, { roll: 300, pitch: 0, yaw: 0 });
+check('a push at a pass boundary is ignored until the pass is accepted',
+  held2.moveSeconds === beforeIgnore, `${held2.moveSeconds.toFixed(2)} s`);
+/* The shell may apply something OTHER than what was proposed, because the
+ * settings path normalises and a pilot may edit a row. The next pass has to
+ * be anchored on what is actually flying. */
+const edited = normaliseRates({ ...held2.pending().rates, yaw: { rcRate: 9, srate: 40, expo: 20 } });
+held2.accept(edited);
+check('the next pass is anchored on what the shell actually applied',
+  ratesDiff(held2.flying) === ratesDiff(edited) && !held2.staleFor(edited));
+check('and it is measuring again', held2.state === 'measuring' && held2.pass === 2);
 
 console.log(failed ? `\n${failed} failed, ${passed} passed` : `\nall ${passed} passed`);
 for (const f of fails) {

@@ -953,3 +953,342 @@ function confidenceOf(stats) {
   const quiet = RATE_AXES.filter((axis) => stats[axis].corrections === 0);
   return { level, moveSeconds: s, quietAxes: quiet };
 }
+
+/*
+ * ============================================================
+ * THE COACH: run the fit over and over until it stops moving.
+ * ============================================================
+ *
+ * WHY ONE PASS IS NOT THE ANSWER. A fit is measured against the profile that
+ * was flown, so it can only ever say "given what you were flying, this is
+ * nearer". Fly the nearer one and it says "nearer still", because a pilot's
+ * hands change when the quad does: give them twice the rate at centre and
+ * their corrections halve, which is the whole mechanism this converges on.
+ * The owner asked for the loop to run itself and hand over the answer, which
+ * is right, because the manual version is the pilot being a for loop.
+ *
+ * WHY THE ANCHOR STILL CANNOT MOVE UNDER A PASS. The obvious reading of
+ * "self improving" is to nudge the rates continuously while flying. That
+ * would measure a flight against a profile that no longer exists and the
+ * arithmetic would mean nothing: `staleFor` exists precisely to refuse it.
+ * So the loop is a SEQUENCE OF PASSES. Each pass measures one fixed
+ * profile. When a pass has enough stick movement the fit is taken, the
+ * shell applies it, and the next pass measures THAT. Each step is as sound
+ * as a single pass because each step IS a single pass.
+ *
+ * THE COACH NEVER WRITES THE QUAD. It says "this pass is done, here are the
+ * next rates" and waits to be told they were applied. Rate application
+ * stays where it already is, in the settings path, in one place, and this
+ * module stays a pure function of what it was fed. It also means the shell
+ * can refuse: a pilot who parks it halfway has a coach sitting patiently at
+ * a pass boundary rather than a quad being retuned underneath them.
+ *
+ * DOES IT ACTUALLY CONVERGE. The centre fit does, in one step, and the
+ * algebra is worth having here. Model a pilot as wanting some fixed
+ * rotation for a correction: they push the stick until the quad turns that
+ * fast, so the travel they use is a = k/c for a pilot constant k and a
+ * slope at centre c. The fit sets c' = c * (a / T) = c * (k/c) / T = k/T,
+ * which does not contain c at all. One pass lands on the fixed point and
+ * the next pass measures a = T and proposes no change. The rate at the stop
+ * converges geometrically rather than in one step, with a ratio of about
+ * 0.93 for a pilot who commits to nine tenths of travel.
+ *
+ * AND WHERE IT DOES NOT. A pilot who pins the stop every single time has
+ * reach equal to the rate at the stop by definition, so the headroom and
+ * the saturation push both fire on every pass and the number climbs
+ * forever, a seventh at a time. There is no fixed point to find: that pilot
+ * genuinely wants more rate than any profile offers them. So the loop stops
+ * on three conditions and says which one it was, rather than only knowing
+ * how to notice that it has settled.
+ */
+
+/*
+ * Stick movement per pass. Longer than SESSION_THIN_S so a pass is never
+ * built on a reading this module itself calls thin, and short enough that a
+ * pilot sees the first change inside a minute of real flying rather than
+ * wondering whether anything is happening.
+ */
+export const PASS_MOVE_S = 25;
+
+/*
+ * Passes before it stops regardless. Six, because the centre fit lands in
+ * one and the rate at the stop closes about 7 percent of its remaining gap
+ * per pass: from double the right answer, six passes is a 1.5 percent error,
+ * which is under one uint8 step. A pilot who is still moving after six is
+ * the runaway case above, not a pilot who needs a seventh.
+ */
+export const PASS_LIMIT = 6;
+
+/*
+ * What counts as having stopped moving: six percent on an endpoint and six
+ * points of expo. Six percent because one uint8 step of an ACTUAL max rate
+ * is 10 deg/s, which on a 450 deg/s profile is 2.2 percent, so this is
+ * about three steps: tight enough that a pilot cannot feel what is left and
+ * loose enough that the measurement noise of one pass does not keep the
+ * loop running forever.
+ */
+const CONVERGE_FRAC = 0.06;
+const CONVERGE_EXPO = 6;
+
+/*
+ * How far the whole loop may ever drag a profile from the one it started
+ * on. Two and a half times, or the same fraction down.
+ *
+ * The per pass clamp in fitAxis stops one bad session; this stops a
+ * compounding run of them. Six passes of the per pass limit would be 64
+ * times, and a pilot who pins the stop would get there: not because the
+ * arithmetic is wrong but because they are asking a question the arithmetic
+ * cannot answer. Hitting this says so in words instead.
+ */
+const DRIFT_LIMIT = 2.5;
+
+/* The endpoints of a profile, per axis, as the fit sees them. */
+function endpointsOf(rates) {
+  const a = anchorOf(normaliseRates(rates));
+  const out = {};
+  for (const axis of RATE_AXES) {
+    out[axis] = { centreDps: a[axis].centreDps, fullDps: a[axis].fullDps };
+  }
+  return out;
+}
+
+/* The largest relative move between two profiles' endpoints, and the
+ * largest change of expo. Expo is compared in uint8 points rather than
+ * relatively because it is legitimately zero, and a relative change from
+ * zero is not a number. */
+function moveBetween(before, after) {
+  const a = endpointsOf(before);
+  const b = endpointsOf(after);
+  let frac = 0;
+  let expo = 0;
+  for (const axis of RATE_AXES) {
+    for (const key of ['centreDps', 'fullDps']) {
+      const from = a[axis][key];
+      if (from > 0) {
+        const d = Math.abs(b[axis][key] / from - 1);
+        if (d > frac) {
+          frac = d;
+        }
+      }
+    }
+    const de = Math.abs(normaliseRates(after)[axis].expo - normaliseRates(before)[axis].expo);
+    if (de > expo) {
+      expo = de;
+    }
+  }
+  return { frac, expo };
+}
+
+export class RateCoach {
+  constructor(rates) {
+    this.session = new RateSession(rates);
+    this.reset(rates);
+  }
+
+  reset(rates) {
+    /* The profile the pilot arrived on, kept for the whole run: the drift
+     * ceiling is measured against it, and the room offers to put it back. */
+    this.opening = normaliseRates(rates);
+    this.flying = this.opening;
+    this.session.reset(rates);
+    this.pass = 1;
+    this.state = 'measuring';
+    this.waiting = null;
+    this.history = [];
+    this.why = '';
+  }
+
+  get moveSeconds() {
+    return this.session.moveSeconds;
+  }
+
+  /* Of the pass in progress, as a fraction, for a progress readout. */
+  get passProgress() {
+    return Math.min(1, this.session.moveSeconds / PASS_MOVE_S);
+  }
+
+  staleFor(rates) {
+    return this.session.staleFor(rates);
+  }
+
+  /*
+   * One frame, and the only place a pass can end.
+   *
+   * It ends on stick movement rather than on wall clock, so a pilot who
+   * parks on the ground halfway through does not get a pass taken off the
+   * half they flew.
+   */
+  push(dtS, stick, gyroDps) {
+    if (this.state !== 'measuring') {
+      return;
+    }
+    this.session.push(dtS, stick, gyroDps);
+    if (this.session.moveSeconds >= PASS_MOVE_S) {
+      this.closePass();
+    }
+  }
+
+  closePass() {
+    const stats = this.session.stats();
+    const fit = fitRates(stats, this.flying);
+    const moved = moveBetween(this.flying, fit.rates);
+    /* Never on the first pass. One measurement cannot be a trend, and a
+     * first pass that happens to propose nothing is a pilot who was already
+     * close rather than a loop that has converged on anything. */
+    const settled = this.pass > 1
+      && moved.frac <= CONVERGE_FRAC && moved.expo <= CONVERGE_EXPO;
+    const drifted = overDrift(this.opening, fit.rates);
+    /*
+     * A PASS THAT WOULD CROSS THE CEILING IS REFUSED, NOT CLAMPED.
+     *
+     * The first version only USED the ceiling to decide that this was the
+     * last pass, and then handed the over-ceiling profile over anyway. A
+     * greedy pilot started on a slow profile walked straight through it: the
+     * check measured 2.69 times the opening against a stated limit of 2.5,
+     * which is a limit in name only.
+     *
+     * Refused rather than clamped because a clamped profile is one nobody
+     * measured: it would be the fit's answer bent to fit a rule, offered
+     * with the fit's own explanation attached, and the explanation would no
+     * longer describe it. What the pilot gets instead is the last profile
+     * that WAS inside the ceiling, which is a profile a pass actually
+     * proposed, plus the advice to fly it and run again. That advice is also
+     * the correct one: the next run's ceiling is measured from the new
+     * opening, so flying it and starting again really does go further.
+     */
+    const rates = drifted ? this.flying : fit.rates;
+    const drift = moveBetween(this.opening, rates);
+    this.waiting = {
+      pass: this.pass,
+      rates,
+      /* True when this pass found something and the ceiling took it away,
+       * so the room can say that rather than showing a pass that changed
+       * nothing and leaving the pilot to wonder. */
+      refused: drifted,
+      wanted: drifted ? fit.rates : null,
+      notes: fit.notes,
+      confidence: fit.confidence,
+      stats,
+      moved,
+      drift,
+      settled,
+      /* The last pass this run will take, so the room can say so BEFORE the
+       * pilot accepts it rather than after. */
+      last: settled || drifted || this.pass >= PASS_LIMIT,
+      why: settled ? 'settled' : (drifted ? 'drift' : (this.pass >= PASS_LIMIT ? 'limit' : '')),
+    };
+    this.state = 'ready';
+  }
+
+  /* The pass that has finished and is waiting to be applied, or null. */
+  pending() {
+    return this.state === 'ready' ? this.waiting : null;
+  }
+
+  /*
+   * The fit over the pass IN PROGRESS, without ending it.
+   *
+   * So the room can show a pilot where the current pass is heading rather
+   * than only ever showing them a finished one. It is a reading of an
+   * incomplete pass and the room labels it as such, but a screen that said
+   * nothing until the pass filled would leave a pilot who flew for twenty
+   * seconds looking at the last pass's numbers with no sign that anything
+   * was happening.
+   *
+   * Called from a render, never per frame: fitting is arithmetic over a
+   * dozen histograms, which is free once a screen opens and is work nobody
+   * can see sixty times a second.
+   */
+  peek() {
+    const stats = this.session.stats();
+    const fit = fitRates(stats, this.flying);
+    return {
+      stats,
+      rates: fit.rates,
+      notes: fit.notes,
+      confidence: fit.confidence,
+      moved: moveBetween(this.flying, fit.rates),
+    };
+  }
+
+  /*
+   * The shell has applied the pending rates. Record the pass and either
+   * start the next one or finish.
+   *
+   * `applied` is what the shell ACTUALLY put on the quad, not what was
+   * proposed, because the two can differ: the settings path normalises, and
+   * a pilot may yet edit a row. The next pass is anchored on what is
+   * flying, which is the only profile a measurement of it would mean
+   * anything against.
+   */
+  accept(applied) {
+    const done = this.waiting;
+    if (!done) {
+      return null;
+    }
+    const flying = normaliseRates(applied || done.rates);
+    this.history.push({
+      pass: done.pass,
+      rates: flying,
+      moveSeconds: done.stats.moveSeconds,
+      moved: done.moved,
+      settled: done.settled,
+      refused: Boolean(done.refused),
+      wanted: done.wanted || null,
+    });
+    this.flying = flying;
+    this.waiting = null;
+    if (done.last) {
+      this.state = 'done';
+      this.why = done.why || 'limit';
+      return this.report();
+    }
+    this.pass = done.pass + 1;
+    this.session.reset(flying);
+    this.state = 'measuring';
+    return null;
+  }
+
+  /*
+   * Where the run got to.
+   *
+   * `why` is a word a pilot can act on, which is the whole reason the loop
+   * distinguishes three endings rather than just stopping:
+   *
+   *   settled   it stopped moving. These are your rates.
+   *   limit     six passes and still moving. Usually a pilot who is on the
+   *             stop constantly and wants more than the fit will give in one
+   *             run; flying these and starting again goes further.
+   *   drift     it wanted to move further from where you started than one
+   *             run is allowed to. Same advice, more emphatically.
+   */
+  report() {
+    return {
+      state: this.state,
+      why: this.why,
+      pass: this.pass,
+      passes: this.history,
+      opening: this.opening,
+      rates: this.flying,
+      drift: moveBetween(this.opening, this.flying),
+    };
+  }
+}
+
+function overDrift(opening, after) {
+  const a = endpointsOf(opening);
+  const b = endpointsOf(after);
+  for (const axis of RATE_AXES) {
+    for (const key of ['centreDps', 'fullDps']) {
+      const from = a[axis][key];
+      if (!(from > 0)) {
+        continue;
+      }
+      const ratio = b[axis][key] / from;
+      if (ratio > DRIFT_LIMIT || ratio < 1 / DRIFT_LIMIT) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
