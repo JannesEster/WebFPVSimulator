@@ -10617,6 +10617,23 @@ export async function boot({ loading, bootStart, mapId }) {
   /* The recorded CSV itself, so a capture can check the file the download
    * button would write without driving a file dialog. */
   window.__flightLogCsv = () => flightLog.csv();
+  /*
+   * The rate measurement, so a capture can fly a known stick program and
+   * ASSERT what was measured rather than reading it off a screenshot.
+   *
+   * Whether it is armed is in here on purpose: "nothing was measured" and
+   * "nothing was watching" look identical from the outside and have
+   * completely different causes, and the first version of this feature shipped
+   * with a session that measured a flight correctly into a room that could
+   * not draw it.
+   */
+  window.__rateMyRates = () => ({
+    armed: rateArmed,
+    measuring: Boolean(ui.measuring),
+    seconds: rateSession.seconds,
+    moveSeconds: rateSession.moveSeconds,
+    read: ui.rateProbe ? ui.rateProbe() : null,
+  });
   /* The ghost, so a capture can ASSERT a chase: what is armed, what the
    * recorder holds, where the rig is and how present it is. */
   window.__ghost = () => {
