@@ -66596,6 +66596,10 @@ Four things, three of them found only by running it.
   MOVES WITH THE FLYING, which is the normal case rather than the pathological one, because the fast parts of a session
   are the parts with the most on screen. That is what the check measures now, and the subject pilot is asserted to be
   clear of the step clamp first, since a clamped proposal agrees with itself at any frame rate.
+- **The room had no Back row.** Found by reading this shell's conventions rather than by looking at the room: every page
+  screen ends with an explicit `{ label: 'Back', action: 'back' }`, twelve of them, and this one was relying on the
+  command bar's Esc. A pilot navigating on a stick has no Escape key, so a room whose only way out is the keyboard is a
+  room they are stuck in. The command bar's "Esc Back" is the keyboard's copy of that row, not a replacement for it.
 
 ### Still open
 
