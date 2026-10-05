@@ -66756,6 +66756,66 @@ the harness does not fly a session; that is said in the comment rather than left
 Also run, all clean and none of them previously run against this change: `lint:nouns` PASS, `lint:boot` 9 of 9,
 `lint:memory` PASS, `lint:frame` 34 of 34, `lint:responsive` PASS, `lint:scale` PASS.
 
+### THE LOOP NEVER ADVANCED, and 74 green checks could not see it
+
+The worst bug of the lot, found by a verification pass driving the real shell rather than by any check in this
+repository. Every module check passed. The feature, in a browser, did nothing whatever.
+
+**What happened.** Applying a pass is a rates change, so it arrives at `applySettings`'s staleness check one call later,
+and that check has to tell the coach's own output from the pilot moving a row on the Rates screen. It was told by
+`ratePassReady`, and the apply block cleared that flag on the line BEFORE calling `applySettings` rather than after it.
+So the guard was open at precisely the moment it existed for: `staleFor` was true, `reset` ran, and `reset` starts a new
+RUN. The pending pass was destroyed before `accept` could record it, the history was wiped, the pass counter went back
+to one, and `opening`, which is the undo target, moved to whatever had just been applied.
+
+The symptom from the outside was a measurement that climbed to about 25 seconds, dropped to zero, and climbed again,
+forever, with `pass` stuck at 1 and `passes` empty. The rates really did change on each wrap, so the quad was being
+retuned repeatedly with no record of it and no way back. `drift` read zero because `opening` had moved with it.
+
+The comment on that guard described the exact failure it was failing to prevent. That is what a flag doing two jobs
+buys you: `ratePassReady` means "a pass has filled", and what the settings path needs to know is "this rates change is
+mine". Those are different facts and they are two flags now, `rateApplying` raised around the settings call.
+
+**A second bug underneath it.** The guard called `reset` for a pilot's own mid-run edit too, which is the wrong tool for
+that case: `reset` moves `opening`. A pilot three passes in who nudged one number would have been offered a put-it-back
+that put them back to what those three passes had already done to them. There is a `restartPass` now: the pass in
+progress is void, because half of it was measured against a profile that is no longer there, and the run survives with
+its opening, its history and its pass number intact.
+
+**`scripts/ratepass-check.js`, new, `npm run check:ratepass`.** The bug was in the join between the module and the
+shell, so the only thing that can see it is the real shell with a real frame loop. It flies one pass headlessly, in the
+town, with a stick held off centre so stick movement accrues at about a second per second, and asserts that the pass
+landed, that the run advanced to pass two, that the rates reached the quad, and, the one that was false, that `opening`
+is still the profile the pilot arrived on.
+
+Mutation tested, which is the only reason it is worth having: with the original ordering restored it fails on five
+steps, naming `passes.length >= 1`, `pass === 2`, `opening` and `drift.frac`. With the fix it passes at exit 0.
+
+It is NOT in the cheap set. A pass is 25 seconds of simulated stick movement and there is no way to shorten that which
+is not special casing the test input, so the check costs what a pass costs, about a hundred seconds including boot.
+
+### What went wrong writing that check
+
+Two goes at it, and both are the same lesson in different clothes.
+
+- **It waited on frames and reported FAIL with every product expectation green.** The first version waited for
+  `window.__boot().frames` to pass 80 and then climbed a ladder of stick-movement seconds. `frameBody` returns early for
+  the whole of a world build, so on the town the frame counter sits still, the first rungs expire, and the run reports
+  failures that are about the harness. It waits on `window.__rateMyRates().seconds` now, which only moves when the coach
+  is actually being pushed from the physics loop, so it means "flying and being measured" rather than "the browser
+  painted something".
+- **Then it reported FAIL on a green run anyway, because of the board.** `scripts/shots.js` puts expectation failures
+  and browser console errors in one bucket and exits 1 for either, and a headless check has no board to talk to, so
+  three refused fetches sank it. Every other check here already tolerates that and says so in a note: `lint:memory`
+  prints "2 network fetch(es) refused, the board is not running here" and `lint:shell` prints thirteen. So this reads
+  its verdict off the log and tolerates exactly refused fetches, failing on any harness fault, any failed step and any
+  other console error. `shots.js` itself was left alone: its contract is shared with a dozen checks and loosening it
+  here would loosen it for all of them.
+- And the first verdict line double counted, reporting "5 console error(s)" for five failed expectations, because
+  `shots.js` both prints a failed step inline and pushes it into the error list. Counted once now, and the parsing was
+  checked against both saved logs: the good run reads 0 steps, 0 real errors, 3 ignored; the buggy run reads 5 steps, 0
+  real errors, 3 ignored.
+
 ### Still open
 
 - A pass is 25 seconds of stick movement, which is a guess. Too short and a pass measures noise, too long and nothing

@@ -1098,6 +1098,31 @@ export class RateCoach {
     this.why = '';
   }
 
+  /*
+   * THE ANCHOR MOVED UNDER THE PASS IN PROGRESS, so throw the PASS away and
+   * keep the RUN.
+   *
+   * This is what a pilot nudging a row on the Rates screen halfway through a
+   * pass should cost them, and `reset` was being called for it. `reset`
+   * starts a new RUN: it wipes the history, it puts the pass counter back to
+   * one, and it moves `opening` to whatever is being flown now. That last
+   * one is the quiet damage, because `opening` is the undo target. A pilot
+   * three passes in who nudged one number would have found the room offering
+   * to put them back to the rates those three passes had already given them,
+   * which is not the profile they arrived on and is not an undo.
+   *
+   * So the run survives: same opening, same history, same pass number, and
+   * the pass starts over against what is now flying. The pass is genuinely
+   * void, because half of it was measured against a profile that is no
+   * longer there, and that is the honest cost of changing rates mid pass.
+   */
+  restartPass(rates) {
+    this.flying = normaliseRates(rates);
+    this.session.reset(this.flying);
+    this.waiting = null;
+    this.state = 'measuring';
+  }
+
   get moveSeconds() {
     return this.session.moveSeconds;
   }

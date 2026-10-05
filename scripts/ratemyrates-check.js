@@ -928,6 +928,50 @@ check('the next pass is anchored on what the shell actually applied',
   ratesDiff(held2.flying) === ratesDiff(edited) && !held2.staleFor(edited));
 check('and it is measuring again', held2.state === 'measuring' && held2.pass === 2);
 
+/*
+ * THE PILOT MOVING A ROW MID RUN COSTS THE PASS, NOT THE RUN.
+ *
+ * `reset` was being called for this and it is the wrong tool: it starts a
+ * new RUN, which moves `opening`. `opening` is the undo target, so a pilot
+ * three passes in who nudged one number would have been offered a put-it-
+ * back that put them back to what those three passes had already done to
+ * them. That is not an undo, and it is the sort of thing nobody notices
+ * until they want their old rates and find them gone.
+ */
+console.log('\n a rates change under a run costs the pass, not the run');
+const midRun = new RateCoach(STOCK);
+const midProg = settler(STOCK);
+let t3 = 0;
+while (!midRun.pending() && t3 < 400) {
+  midRun.push(1 / 120, midProg(t3), { roll: 40, pitch: 40, yaw: 40 });
+  t3 += 1 / 120;
+}
+midRun.accept(midRun.pending().rates);
+const afterOne = ratesDiff(midRun.flying);
+check('one pass is on the record', midRun.history.length === 1 && midRun.pass === 2);
+/* Now the pilot nudges a row. */
+const nudged = normaliseRates({ ...midRun.flying, roll: { ...midRun.flying.roll, srate: midRun.flying.roll.srate + 3 } });
+let t4 = 0;
+while (midRun.moveSeconds < 8 && t4 < 100) {
+  midRun.push(1 / 120, midProg(t4), { roll: 40, pitch: 40, yaw: 40 });
+  t4 += 1 / 120;
+}
+const partway = midRun.moveSeconds;
+midRun.restartPass(nudged);
+check('the part-flown pass is thrown away', partway > 4 && midRun.moveSeconds === 0,
+  `${partway.toFixed(1)} s in, now ${midRun.moveSeconds.toFixed(1)} s`);
+check('the run is not: the pass number holds', midRun.pass === 2, `pass ${midRun.pass}`);
+check('and so does the history', midRun.history.length === 1);
+check('and the undo target is still the profile the pilot arrived on',
+  ratesDiff(midRun.opening) === ratesDiff(STOCK), ratesShort(midRun.opening));
+check('while the new pass is anchored on what the pilot just set',
+  ratesDiff(midRun.flying) === ratesDiff(nudged) && !midRun.staleFor(nudged));
+check('which is not what the last pass set', ratesDiff(nudged) !== afterOne);
+/* And reset, which IS for a new run, does move the opening. */
+midRun.reset(nudged);
+check('reset, for a new run, does move the undo target',
+  ratesDiff(midRun.opening) === ratesDiff(nudged) && midRun.history.length === 0 && midRun.pass === 1);
+
 console.log(failed ? `\n${failed} failed, ${passed} passed` : `\nall ${passed} passed`);
 for (const f of fails) {
   console.log(`  FAIL ${f}`);

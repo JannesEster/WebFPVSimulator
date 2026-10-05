@@ -54,6 +54,7 @@
     "check:path": "node scripts/path-check.js",
     "check:fresh": "node scripts/fresh-check.js",
     "check:ratemyrates": "node scripts/ratemyrates-check.js",
+    "check:ratepass": "node scripts/ratepass-check.js",
     "gen:catalog": "node scripts/fc-catalog-gen.js",
     "gen:music": "node scripts/music.js",
     "gen:icons": "node scripts/icons.js sakura . && node scripts/icons.js amber src/trackbuilder",

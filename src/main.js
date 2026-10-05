@@ -2696,6 +2696,20 @@ export async function boot({ loading, bootStart, mapId }) {
    */
   let ratePassReady = false;
   /*
+   * TRUE ONLY WHILE THE COACH'S OWN RATES CHANGE IS IN FLIGHT.
+   *
+   * A separate flag from ratePassReady, and the separation is a bug fix.
+   * The two facts are not the same: ratePassReady means "a pass has filled",
+   * and what the settings path needs to know is "the rates change you are
+   * being handed is mine, not the pilot's". They were one flag, cleared one
+   * line before applySettings rather than after it, so the guard that exists
+   * to stop the coach reading its own output as the pilot moving a row was
+   * open at exactly the moment it was needed. Every pass reset the run, the
+   * pass counter never reached two, and the loop silently did nothing for
+   * the whole of its first evening. See PROGRESS.md 2026-10-05.
+   */
+  let rateApplying = false;
+  /*
    * Stick samples waiting for an RC slot, and the value currently held.
    *
    * The old code took `samples[samples.length - 1]` and used it for every RC
@@ -5583,16 +5597,24 @@ export async function boot({ loading, bootStart, mapId }) {
       rateArmed = wantRate;
       rateCoach.reset(s.rates);
       ratePassReady = false;
-    } else if (rateArmed && !ratePassReady && rateCoach.staleFor(s.rates)) {
+    } else if (rateArmed && !rateApplying && rateCoach.staleFor(s.rates)) {
       /*
-       * NOT WHILE A PASS IS WAITING TO BE APPLIED, and the guard is the
-       * whole reason this flag is checked here. Applying a pass IS a rates
-       * change, so it lands in this very branch one frame later: without the
-       * guard the coach would see its own output as the pilot moving a row
-       * under it and throw the run away on every single pass. The run would
-       * never reach pass two.
+       * THE PILOT MOVED THE RATES UNDER A RUN, so the pass in progress is
+       * void and the run is not.
+       *
+       * NOT THE COACH'S OWN APPLY. Applying a pass IS a rates change and
+       * lands in this very branch, so rateApplying is what tells the two
+       * apart. It has to be a flag of its own: this guard used to read
+       * ratePassReady, which the apply block cleared one line too early, so
+       * the coach read its own output as the pilot's edit and reset the run
+       * on every single pass. The counter never reached two.
+       *
+       * AND restartPass, NOT reset. reset starts a new RUN and moves
+       * `opening`, which is the undo target, so a pilot three passes in who
+       * nudged one number would have been offered a put-it-back that put
+       * them back to what those three passes had already done to them.
        */
-      rateCoach.reset(s.rates);
+      rateCoach.restartPass(s.rates);
     }
     audio.setLevel(s.volume / 10);
     audio.setEnabled(s.sound);
@@ -7625,11 +7647,14 @@ export async function boot({ loading, bootStart, mapId }) {
      */
     if (ratePassReady) {
       const pass = rateCoach.pending();
-      ratePassReady = false;
       if (pass) {
+        /* Raised BEFORE the settings path and lowered after it, which is the
+         * whole of the ordering that was wrong. See rateApplying. */
+        rateApplying = true;
         ui.settings.rates = normaliseRates(pass.rates);
         ui.persistSettings();
         applySettings(ui.settings);
+        rateApplying = false;
         /* What the settings path ACTUALLY put on the quad, which is what the
          * next pass has to be anchored on. */
         const report = rateCoach.accept(ui.settings.rates);
@@ -7641,6 +7666,7 @@ export async function boot({ loading, bootStart, mapId }) {
         };
         ui.renderMenu();
       }
+      ratePassReady = false;
     }
     const blockStart = performance.now();
     const dt = Math.min(nowWall - prevWall, 100);
