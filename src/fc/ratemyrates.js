@@ -284,6 +284,73 @@ const SUSTAIN_S = 0.12;
 const FAST_DPS = 300;
 const SHORTFALL = 0.6;
 
+/*
+ * ROTATION NOBODY ASKED FOR IS NOT A MEASUREMENT OF THE PILOT.
+ *
+ * This was found by flying it. A synthetic pilot flown through the town for
+ * twelve seconds, which included hitting a building and tumbling, came back
+ * with a proposal of double the rate on all three axes, yaw included, on a
+ * session whose yaw stick never left six tenths of travel. The tumble was
+ * the whole of it: a crashed quad rotates faster than any stick commands,
+ * and `reach` is a 99th percentile of TIME, so a second and a half of
+ * cartwheel in a twelve second session is far above the one percent tail
+ * that percentile was chosen to discard.
+ *
+ * So the rotation histogram takes a sample only when the rotation is
+ * plausibly the one that was commanded. Half again over the demand, plus a
+ * floor, which between them pass the three things that are not a crash:
+ *
+ *   the lag at the start of an input, where the gyro is BELOW the demand
+ *     and has never been the problem;
+ *   the overshoot at the end of one, where a well tuned quad crosses its
+ *     setpoint by a few percent and a soft one by rather more;
+ *   propwash, a clipped branch, a scrape along a wall, which are real
+ *     flying and produce real rotation near centre stick.
+ *
+ * The floor is what makes the near centre case work at all: at a centred
+ * stick the demand is nearly zero, so a pure ratio would discard every
+ * disturbance a pilot ever corrects for and the measurement would only ever
+ * see deliberate inputs. 150 deg/s is about what a five inch picks up off
+ * its own wake and off a knock; a cartwheel is several times it.
+ *
+ * NOT A CRASH FLAG, and that is deliberate. The shell knows when it has
+ * declared a crash and could pass a flag down, and that would miss the
+ * cases that matter most: clipping a gate strut, catching a prop on a wall,
+ * the half second after a hard knock while the quad is still spinning.
+ * Those are not crashes and they are not the pilot either. A rule about
+ * what the quad is doing against what it was told covers all of it and is
+ * testable without a browser.
+ */
+const UNCOMMANDED_RATIO = 1.5;
+const UNCOMMANDED_FLOOR = 150;
+
+/*
+ * AGAINST THE DEMAND OF A MOMENT AGO, NOT THE DEMAND OF THIS INSTANT, and
+ * this correction is the second thing testing found.
+ *
+ * Compared instant against instant, the rule above throws away every
+ * REVERSAL. Halfway through a roll reversal the stick is passing through
+ * centre, so the demand is nothing, while the quad is still turning at 600
+ * deg/s because it cannot stop instantly. By an instantaneous reading that
+ * is uncommanded rotation. It is the exact opposite: it is the rotation the
+ * pilot asked for, still arriving.
+ *
+ * Measured, a committed pilot lost 2.4 percent of the session to this, and
+ * a pilot whose stick crossed in a realistic 80 ms lost 3.4, which is worse
+ * because a slower crossing spends longer near centre. Both numbers are the
+ * same defect and neither is a threshold to widen.
+ *
+ * So the comparison is against a HELD PEAK of the demand, decaying. What
+ * the pilot asked for in the last fraction of a second is what the quad is
+ * allowed to still be doing. The decay is in deg/s per second and is set so
+ * a full stick demand's licence is spent in a little over a quarter of a
+ * second, which is long enough for any airframe here to finish a reversal
+ * and far short of a tumble: a crashed quad spins for whole seconds with
+ * nothing behind it, and a quarter of a second into that the licence is
+ * gone and the rest of the cartwheel is discarded.
+ */
+const DEMAND_DECAY = 2500;
+
 /* Where the anchor's slope at centre is read. Small enough that every
  * curve in fc/rc.c is still straight at it, large enough that the division
  * below is nowhere near the floating point floor. */
@@ -374,6 +441,13 @@ class AxisTally {
     this.moveTime = 0;
     this.satTime = 0;
     this.peak = 0;
+    /* Time whose rotation was plausibly the commanded one, which is what
+     * the rotation histogram is a distribution over, and time whose was
+     * not. See UNCOMMANDED_RATIO. */
+    this.rateTime = 0;
+    this.wildTime = 0;
+    /* The decaying held peak of the demand: see DEMAND_DECAY. */
+    this.demandHold = 0;
     this.corrCount = 0;
     this.corrTime = 0;
     /* The half cycle in progress: which way the stick is going, the most
@@ -408,10 +482,23 @@ class AxisTally {
     this.time += dtS;
     const mag = stick < 0 ? -stick : stick;
     const demand = demandDps < 0 ? -demandDps : demandDps;
-    if (achievedDps > this.peak) {
-      this.peak = achievedDps;
+    /*
+     * THE ROTATION, IF IT WAS THE ROTATION THAT WAS ASKED FOR. A tumble, a
+     * wall or a prop strike produces more than any stick commanded, and
+     * sizing a rate profile off it sizes it off a crash. See
+     * UNCOMMANDED_RATIO. The peak is filtered too: the airframe's veto
+     * reads it, and a veto measured against a cartwheel is no veto.
+     */
+    this.demandHold = Math.max(demand, this.demandHold - DEMAND_DECAY * dtS);
+    if (achievedDps <= this.demandHold * UNCOMMANDED_RATIO + UNCOMMANDED_FLOOR) {
+      this.rateTime += dtS;
+      if (achievedDps > this.peak) {
+        this.peak = achievedDps;
+      }
+      this.rate[bandOf(achievedDps / RATE_W, RATE_N, 1)] += dtS;
+    } else {
+      this.wildTime += dtS;
     }
-    this.rate[bandOf(achievedDps / RATE_W, RATE_N, 1)] += dtS;
     /*
      * SUSTAINED DEMAND, THEN SHORTFALL. The hold has to survive the whole
      * of SUSTAIN_S before any of its time is counted, so the lag at the
@@ -521,8 +608,13 @@ class AxisTally {
        * the first smoke test: two numbers on one line contradicting each
        * other, which is worse than either being slightly wrong.
        */
-      reach: Math.min(quantile(this.rate, this.time, REACH_Q, RATE_W), this.peak),
+      reach: Math.min(quantile(this.rate, this.rateTime, REACH_Q, RATE_W), this.peak),
       peak: this.peak,
+      /* How much of the session the quad was doing something it was not
+       * told to. Reported rather than silently dropped: a pilot who spent a
+       * third of their flight tumbling has measured a third of a flight,
+       * and the room says so. */
+      wildShare: this.time > 0 ? this.wildTime / this.time : 0,
       /* How the corrections were shaped. */
       correction: corrTotal > 0 ? quantile(this.corr, corrTotal, 0.5, CORR_W) : 0,
       corrections: corrTotal,

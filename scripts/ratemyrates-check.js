@@ -128,6 +128,8 @@ function fly({
   return sess;
 }
 
+const clampUnit = (v) => (v < 0 ? 0 : (v > 1 ? 1 : v));
+
 function axisSpec(r, axis) {
   const a = r[axis];
   return {
@@ -330,6 +332,92 @@ check('and the shortfall was actually seen', unableStats.roll.unreachable > 0.5,
 check('while the able airframe saw none', fly({
   prog: snapper, seconds: 90, rates: STOCK, craft: lagged(2000),
 }).stats().roll.unreachable < 0.5);
+
+/*
+ * A CRASH MUST NOT SIZE A RATE PROFILE, and this check exists because the
+ * first build of this feature let one.
+ *
+ * Flown through the town for twelve seconds, including a building and the
+ * tumble after it, it proposed double the rate on all three axes. Yaw
+ * included, on a session whose yaw stick never passed six tenths of travel.
+ * A cartwheeling quad rotates faster than any stick asks for, and `reach` is
+ * a percentile of TIME, so a second of tumble in a short session sits well
+ * inside the top one percent that percentile was meant to discard.
+ *
+ * Here the same gentle pilot is flown twice: once against an airframe that
+ * does as it is told, and once against one that spends a fifth of the
+ * session spinning at 900 deg/s regardless of the stick. The proposal must
+ * not move, and the discarded share must be reported rather than hidden.
+ */
+console.log('\n a tumble is not a measurement of the pilot');
+const tumbler = (ceiling) => () => {
+  let t = 0;
+  return (demand, dt) => {
+    t += dt;
+    /* A fifth of the session, in one second bursts, spinning hard. */
+    if ((t % 5) > 4) {
+      return 900;
+    }
+    return Math.min(Math.abs(demand), ceiling);
+  };
+};
+const calm = fit(fly({ prog: hover(0.06), seconds: 90, rates: STOCK }), STOCK);
+const thrown = fit(fly({
+  prog: hover(0.06), seconds: 90, rates: STOCK, craft: tumbler(Infinity),
+}), STOCK);
+check('a pilot who tumbled gets the same proposal as one who did not',
+  ratesDiff(calm.rates) === ratesDiff(thrown.rates),
+  `${ratesShort(calm.rates)} against ${ratesShort(thrown.rates)}`);
+const thrownStats = fly({
+  prog: hover(0.06), seconds: 90, rates: STOCK, craft: tumbler(Infinity),
+}).stats();
+check('and the uncommanded rotation is reported, not hidden',
+  thrownStats.roll.wildShare > 0.1 && thrownStats.roll.wildShare < 0.3,
+  `${(thrownStats.roll.wildShare * 100).toFixed(0)} percent of the session`);
+check('while the calm pilot reports none',
+  fly({ prog: hover(0.06), seconds: 90, rates: STOCK }).stats().roll.wildShare === 0);
+/*
+ * AND THE FILTER MUST NOT EAT REAL FLYING, which took two goes to state
+ * correctly and the first wrong version is worth keeping written down.
+ *
+ * It was asserted on `snapper`, and `snapper` discarded 2.4 percent of its
+ * session against a band of 2. The filter was not the problem: `snapper` is
+ * a SQUARE WAVE, its stick crosses from the stop to centre inside one
+ * frame, and for the few tens of milliseconds afterwards the quad is still
+ * turning at 600 deg/s with a demand of nothing behind it. By this rule's
+ * definition that rotation is uncommanded, and by any honest reading of
+ * what a human hand can do, a stick that teleports is the fixture's fault
+ * and not the pilot's.
+ *
+ * The temptation was to widen the band to 3 percent. That is the one thing
+ * CLAUDE.md forbids outright, and it would have been hiding a real question
+ * behind a number. So the question is split in two instead, and each half
+ * is asserted on the fixture that can actually answer it:
+ *
+ *   a REALISTIC stick, which takes 80 ms to cross its travel the way a
+ *     thumb does, must lose almost nothing;
+ *   the square wave, which is allowed to lose its decay tails, must still
+ *     come back with the right rate at the stop, because preserving the
+ *     fast end of the session is what the assertion was ever about.
+ */
+const rampedSnaps = (t) => {
+  /* A 2 s cycle: cross in 80 ms, hold, cross back, rest. */
+  const u = t % 2;
+  const cross = (a, b, at, dur) => a + (b - a) * clampUnit((u - at) / dur);
+  const s = u < 0.9 ? cross(0, 0.98, 0, 0.08) : cross(0.98, -0.98, 0.9, 0.08);
+  return { roll: s, pitch: 0, yaw: 0 };
+};
+const ramped = fly({
+  prog: rampedSnaps, seconds: 90, rates: STOCK, craft: lagged(2000),
+}).stats().roll;
+check('a realistic stick loses almost nothing to the filter',
+  ramped.wildShare < 0.005,
+  `${(ramped.wildShare * 100).toFixed(2)} percent discarded, reach ${Math.round(ramped.reach)}`);
+const squared = fly({
+  prog: snapper, seconds: 90, rates: STOCK, craft: lagged(2000),
+}).stats().roll;
+check('and the square wave still measures the rate it reached',
+  squared.reach > 550, `reach ${Math.round(squared.reach)}, peak ${Math.round(squared.peak)}`);
 
 /*
  * EXPO FOLLOWS THE TIME SPENT IN THE PART EXPO SHAPES.
