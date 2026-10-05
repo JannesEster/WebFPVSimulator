@@ -128,6 +128,23 @@ const SCREENS = [
   /* Advanced, from 1 October (MENUS-PLAN.md 2.3): the picture and latency
    * knobs and the flight log, one door down from Settings. */
   'advanced',
+  /*
+   * Rate my Rates, from 5 October: the room behind the gate's fourth card,
+   * which reads a measured session and refines the rate profile across
+   * passes.
+   *
+   * HERE BECAUSE OF THE tricks COMMENT ABOVE. That screen shipped with its
+   * entire list below the fold for exactly one reason, which is that nothing
+   * walked it, and this room is the same shape of risk: its row count grows
+   * with the number of passes flown, so the version a pilot sees at the end
+   * of a six pass run is the longest list in the shell outside the firmware
+   * bench. What this walk sees is the room with nothing measured, because
+   * the harness has not flown a session, so it covers the rows being
+   * reachable and the way out existing and nothing about the long form.
+   * scripts/ratemyrates-check.js covers the arithmetic; the long form is
+   * still only covered by a pilot opening it.
+   */
+  'ratemyrates',
 ];
 
 /*
