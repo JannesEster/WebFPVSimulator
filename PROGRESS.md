@@ -66611,3 +66611,122 @@ Four things, three of them found only by running it.
   anybody.
 - Nothing is saved. The proposal lives until the next session and the preset library is reached by hand through the
   Rates screen. A "save this as a preset" row in the room itself would skip a step.
+
+## 2026-10-05 | fc, shell | Rate my Rates runs itself: passes, convergence, and three ways to stop
+
+### The ask
+
+The owner, same thread, after the one shot version was pushed: "you can mayby have a system that self improves as you
+fly and just gives you the final outcome rates". Correct, and the manual version was the pilot being a for loop: fly,
+take the proposal, fly again, take again, until it stops moving.
+
+### Why a sequence of passes and not a moving anchor
+
+The obvious reading of "self improving" is to nudge the rates continuously while flying. That cannot work and the
+module already said so: a fit is measured AGAINST the profile that was flown, `staleFor` exists to refuse a session
+whose rates moved under it, and continuous nudging is that case on every frame. The arithmetic would mean nothing.
+
+So the loop is a sequence of passes. Each pass measures ONE fixed profile. When a pass has `PASS_MOVE_S` of stick
+movement, 25 seconds, the fit is taken, the shell applies it, and the next pass is anchored on what is now flying. Every
+step is as sound as a single pass because every step IS a single pass.
+
+**The coach never writes the quad.** It says "this pass is done, here are the next rates" and waits to be told what was
+applied. Rate application stays in the settings path, in one place, and the shell can decline: a pilot who parks it
+halfway leaves a coach sitting at a pass boundary rather than a quad being retuned underneath them. `accept()` takes
+what was ACTUALLY applied rather than what was proposed, because the settings path normalises and a pilot may edit a
+row, and the next pass has to be anchored on the profile that is really flying.
+
+**Applied at a frame boundary.** The coach notices a full pass inside the physics block, and applying rates is a
+`sim_init` plus a re-seat. Doing that mid frame would invalidate the two states the renderer is about to interpolate
+between and the frame would draw a pop. Flagged and handled at the top of the next frame, which is the same moment a
+settings change from a menu lands.
+
+### Does it converge
+
+The centre fit converges in ONE step and the algebra is in the file. Model a pilot as wanting a fixed rotation out of a
+correction: they push the stick until the quad turns that fast, so the travel they use is `a = k/c` for a pilot constant
+k and a slope at centre c. The fit sets `c' = c * (a/T) = c * (k/c)/T = k/T`, which does not contain c at all. One pass
+lands on the fixed point, and the next pass measures `a = T` and proposes nothing.
+
+The rate at the stop depends on the pilot's model. One who wants a fixed ROTATION converges in one step too, because
+what they reach barely depends on what the stop offers. One who commits to a fixed FRACTION of travel converges
+geometrically, ratio about 0.93 at nine tenths, which is what the six pass limit is sized for.
+
+And one case does not converge at all: a pilot who pins the stop every time has `reach` equal to the rate at the stop by
+definition, so the headroom and the saturation push both fire on every pass and the number climbs a seventh at a time
+forever. There is no fixed point to find, because that pilot genuinely wants more rate than any profile offers. So the
+loop has THREE endings and says which it was, rather than only knowing how to notice that it has settled:
+
+    settled   it stopped moving. Six percent on an endpoint, six points of expo, and never on pass one, because one
+              measurement cannot be a trend.
+    limit     six passes and still moving. Fly these and run again.
+    drift     it wanted to move further from the opening profile than one run may. Same advice, more emphatically.
+
+### What changed
+
+**`src/fc/ratemyrates.js`.** `RateCoach` beside `RateSession`: `push`, `pending()`, `accept(applied)`, `peek()` for the
+pass in progress, `report()`. `DRIFT_LIMIT` of 2.5 times the opening profile, measured on both endpoints of every axis.
+
+**`src/main.js`.** The coach replaces the bare session. `ratePassReady` defers the apply to the frame boundary. The
+staleness reset is now skipped while a pass is waiting, which matters: applying a pass IS a rates change, so it lands in
+the staleness branch one frame later, and without the guard the coach would read its own output as the pilot moving a
+row and throw the run away on every pass. The run would never reach pass two.
+
+**`src/ui/ui.js`.** The room speaks in passes: which pass and how far through it, where the pass in progress is heading,
+a row per completed pass with what it set and how much it moved, and the verdict with its reason. Take these rates is
+gone, because the loop applies its own passes; what replaced it is Put my old rates back, which restores the profile the
+pilot ARRIVED on rather than the previous pass, since halfway back is not a place anybody asked to be.
+
+### Checks
+
+    npm run check:ratemyrates   all 66 passed
+    npm run lint:fc             33 of 33 traces clean
+    npm run verify              not run, and for the same reason as the entry above: nothing under src/native/,
+                                patches/ or vendor/betaflight was touched and the coach observes the state block.
+
+The new checks are a CLOSED LOOP, which is the point. Every synthetic pilot in the file before this was open loop, a
+fixed stick program flown whatever the profile was, and that is the right fixture for one fit and useless for a loop: a
+loop converges by the pilot CHANGING when the quad does. So the coach is tested against a pilot with INTENT rather than
+a waveform. It wants some rotation out of a correction and some out of a committed move, and it pushes the stick as far
+as THIS profile needs to get them, inverting the firmware's own curve numerically. Give it twice the slope at centre and
+its corrections halve, which is the mechanism under test.
+
+Asserted: it settles rather than running out of passes; it settles on pass two having materially moved the profile on
+pass one, so it is not settling on a no-op; and, the one that matters most, **the settled profile puts that pilot's
+corrections on the 10 percent target**, measured at 0.088 of travel. That is convergence on the RIGHT fixed point rather
+than merely convergence. Also asserted: a pilot already on their own answer is left there; a pilot with no fixed point
+is stopped and told which ending it was; the coach ignores pushes at a pass boundary; and the next pass anchors on what
+the shell applied rather than what was proposed, including when the shell applies something different.
+
+### What went wrong
+
+- **The drift ceiling was a limit in name only.** It was used to decide that a pass was the LAST one and then the over
+  ceiling profile was handed over anyway. The check caught a greedy pilot started on a slow profile walking through it:
+  2.69 times the opening against a stated limit of 2.5. Such a pass is now REFUSED rather than clamped, and the reason
+  is worth keeping: a clamped profile is one nobody measured, and it would be offered with the fit's own explanation
+  attached while that explanation no longer described it. The pilot keeps the last profile that was inside the ceiling,
+  which a pass really did propose, and is told the pass was refused rather than being shown a pass that changed nothing.
+- **The drift ceiling was unreachable from the Betaflight default.** Found while writing the check: a greedy pilot only
+  gets about 1.15 times over all six passes, because reach is capped both by what the airframe delivers and by the
+  uncommanded rotation filter, so the pass limit always arrives first. It is not dead code, it is out of range from a
+  profile that is already quick. There is now a case that starts on 200 deg/s, where it is well in range and fires on
+  pass two.
+- **The room's lede became a lie.** It said "Nothing here changes the quad until you take it", which was true of the one
+  shot version and false the moment the loop applied its own passes. A screen that misdescribes what it is doing to the
+  quad is worse than a screen that says nothing.
+- **The harness hook still referenced the old session object.** Caught by the headless capture throwing
+  `ReferenceError: rateSession is not defined` out of `window.__rateMyRates`. `node --check` cannot see an undefined
+  free variable, so only running it found this.
+- The first convergence assertion was "more than one pass and fewer than the limit", which this pilot satisfies at
+  exactly two every time. Vacuous on its own, so it now asserts two passes AND that pass one moved the profile by more
+  than five percent, with a note on why two is the honest answer for a fixed rotation pilot rather than a suspiciously
+  quick one.
+
+### Still open
+
+- A pass is 25 seconds of stick movement, which is a guess. Too short and a pass measures noise, too long and nothing
+  appears to be happening. Worth a pilot's opinion.
+- The convergence bands, six percent and six points of expo, are the same kind of guess.
+- The whoop still is not offered, and nothing in the fit is five inch specific.
+- Flight feel is unverified and cannot be verified from here. Whether a settled profile is a profile worth flying is a
+  pilot's judgement, and the owner has offered to fly it.
