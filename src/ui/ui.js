@@ -8968,6 +8968,7 @@ export class Ui {
             primary: true,
             note: 'Seats the five inch, puts you in a freestyle world with no gates and no clock, and starts watching.',
           }]),
+          { label: 'Back', action: 'back' },
         ];
       }
       const { stats, fit } = read;
@@ -9047,6 +9048,12 @@ export class Ui {
             + 'proposal: the next session measures you flying the new profile, and that is what '
             + 'moves it closer rather than further.',
         },
+        /* Every page screen in this shell ends with one, and it is not
+         * decoration: a pilot navigating on a stick has no Escape key, so a
+         * room whose only way out is the keyboard is a room they are stuck
+         * in. The command bar's "Esc Back" is the keyboard's copy of this
+         * row, not a replacement for it. */
+        { label: 'Back', action: 'back' },
       ];
     }
     if (this.screen === 'rates') {
