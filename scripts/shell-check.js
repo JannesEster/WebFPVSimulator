@@ -1497,23 +1497,28 @@ const BEHAVIOUR = `(() => {
       cards,
       backFromWhoop,
       whoop,
-      /* The three ways in, every one of them with a photograph AND a plan
+      /* The FOUR ways in, every one of them with a photograph AND a plan
        * drawing, then the builder's card with a photograph and no drawing,
        * and not a row among them: the whole point of the screen is that it
-       * is not a menu. */
-      asksFour: gate.length === 4
-        /* The fourth card is the builder, under its one name since
+       * is not a menu.
+       *
+       * Rate my Rates is the fourth way, added 2026-10-05. It seats the five
+       * inch and sets a mode like the three before it, so it carries a plan
+       * drawing like them; the builder seats nothing and still does not. It
+       * sits before the builder because the flying cards belong together. */
+      asksFive: gate.length === 5
+        /* The last card is the builder, under its one name since
          * MENUS-PLAN.md 4.1: it was Map builder on this card and Track
          * builder in the builder's own title. */
-        && gate.join() === 'Five inch racing,Whoop racing,Freestyle,Builder'
+        && gate.join() === 'Five inch racing,Whoop racing,Freestyle,Rate my Rates,Builder'
         && gateItems.filter((it) => !it.card).length === 0,
-      asCards: cards.length === 4 && cards.slice(0, 3).every((c) => c.shot && c.drawn)
-        && Boolean(cards[3].shot) && !cards[3].drawn,
+      asCards: cards.length === 5 && cards.slice(0, 4).every((c) => c.shot && c.drawn)
+        && Boolean(cards[4].shot) && !cards[4].drawn,
       builderAction,
       modeSetGate,
-      /* Four cards, laid out and visible, and the menu's own copy off the
-       * screen, when the mode is answered and the aircraft is not. */
-      gateWithMode: modeSetGate.isGate && modeSetGate.cards.length === 4
+      /* All five cards, laid out and visible, and the menu's own copy off
+       * the screen, when the mode is answered and the aircraft is not. */
+      gateWithMode: modeSetGate.isGate && modeSetGate.cards.length === 5
         && modeSetGate.cards.every((c) => c.wide) && modeSetGate.keepNote === 0,
       /* One press: the whoop is seated, the mode is race, the seat is a
        * track rather than a world, the gate is gone and no Freestyle row
@@ -2113,8 +2118,8 @@ async function main() {
       failures.push(`the gate: ${b.modeGate ? b.modeGate.error : 'no result'}`);
     } else {
       const g = b.modeGate;
-      if (!g.asksFour) {
-        failures.push(`the gate opens on ${g.gate.join(', ') || 'nothing'}, not on the three ways in and the builder`);
+      if (!g.asksFive) {
+        failures.push(`the gate opens on ${g.gate.join(', ') || 'nothing'}, not on the four ways in and the builder`);
       }
       if (!g.asCards) {
         failures.push(

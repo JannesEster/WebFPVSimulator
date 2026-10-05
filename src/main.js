@@ -65,6 +65,7 @@ import { PAD_CALM } from './input/padgate.js';
 import { mountTouchSticks, touchWanted } from './input/touchsticks.js';
 import { RcLink, LINK_DEFAULT, LINK_PRESETS } from './input/link.js';
 import { FlightRecorder, downloadText, flightLogName } from './share/flightlog.js';
+import { RateSession, fitRates } from './fc/ratemyrates.js';
 import { PRACTICE_LAPS, Race, runComplete } from './game/race.js';
 import { TrickDetector } from './game/trickdetect.js';
 import { deriveObstacles, OB_BAR, OB_POLE } from './game/obstacles.js';
@@ -362,6 +363,10 @@ const RC_HZ = 250;
  */
 const SIM_HZ = 1000;
 const MS_PER_STEP = 1000 / SIM_HZ;
+/* The state block's body rates are rad/s and every reader of them that
+ * shows a pilot a number wants deg/s. src/share/flightlog.js writes the
+ * same factor inline for its gyro columns. */
+const RAD_TO_DEG = 57.29577951308232;
 /*
  * How near a wall a Wall Ride is flown, in metres.
  *
@@ -2657,6 +2662,27 @@ export async function boot({ loading, bootStart, mapId }) {
    * quad's log go through the same parser and the same report.
    */
   const flightLog = new FlightRecorder();
+  /*
+   * THE RATE MY RATES ACCUMULATOR, which is always allocated and only ever
+   * fed while the card is up.
+   *
+   * ALWAYS ALLOCATED, because unlike the flight recorder beside it this
+   * costs nothing to have: it is a handful of fixed arrays, about ten
+   * kilobytes, and it does not grow with the length of the flight. See
+   * src/fc/ratemyrates.js on fixed memory.
+   *
+   * ONLY FED WHILE MEASURING, because a session is a thing a pilot started.
+   * `ui.measuring` is set by the gate card and cleared by every other card,
+   * and the rising edge is what resets the accumulator, so pressing the card
+   * is what begins a fresh measurement.
+   *
+   * RESET WHEN THE RATES MOVE UNDER IT, because the fit is a change FROM the
+   * profile that was flown and a flight measured against two profiles is two
+   * flights. The session knows; it does not reset itself, because a silent
+   * restart is a session the pilot thinks they flew.
+   */
+  const rateSession = new RateSession(ui.settings.rates);
+  let rateArmed = false;
   /*
    * Stick samples waiting for an RC slot, and the value currently held.
    *
@@ -5522,6 +5548,31 @@ export async function boot({ loading, bootStart, mapId }) {
     if (flightLog.on !== s.flightLog) {
       flightLog.setEnabled(s.flightLog);
     }
+    /*
+     * THE RATE SESSION, ARMED ON THE EDGE AND RESET WHEN THE RATES MOVE.
+     *
+     * Two separate reasons to start over, and they are deliberately not one
+     * branch, because the pilot is told different things about them.
+     *
+     *   The EDGE. `ui.measuring` goes true when the Rate my Rates card is
+     *   pressed and false when any other card is, so pressing the card is
+     *   what starts a fresh measurement. Pressing it again starts another
+     *   one, which is what the room's "Start again" row does.
+     *
+     *   The RATES. The fit is a change from the profile that was flown, so a
+     *   flight measured half on one profile and half on another is not a
+     *   measurement of either. Taking a proposal, or nudging one row on the
+     *   Rates screen, lands here and starts the next session against the new
+     *   numbers, which is exactly the loop that converges: fly, take, fly
+     *   again. The room says so on its "Flying now" row.
+     */
+    const wantRate = Boolean(ui.measuring);
+    if (wantRate !== rateArmed) {
+      rateArmed = wantRate;
+      rateSession.reset(s.rates);
+    } else if (rateArmed && rateSession.staleFor(s.rates)) {
+      rateSession.reset(s.rates);
+    }
     audio.setLevel(s.volume / 10);
     audio.setEnabled(s.sound);
     applyMix(s);
@@ -8011,6 +8062,39 @@ export async function boot({ loading, bootStart, mapId }) {
         /* Launch stand constraint runs inside sim_step. Ground contact
          * runs after plant_step at 1 kHz when the plane is raised. */
         flightLog.push(stateCurr, rcHeld, FULL_THROTTLE_RPM);
+        /*
+         * AND THE RATE MEASUREMENT, WEIGHTED BY SIMULATED TIME.
+         *
+         * `flown * MS_PER_STEP` is how long the craft actually flew this
+         * frame, not how long the frame took, and that distinction is the
+         * whole reason this line is here rather than in the render loop.
+         * The accumulator has to be weighted by time or a 144 Hz machine
+         * measures a different pilot from a 60 Hz one, and SIMULATED time
+         * makes that exact rather than approximate: the integrator takes
+         * the same number of 1 ms steps for the same flight whatever the
+         * browser is doing, so the weighting does not depend on the frame
+         * rate at all. A dropped frame moves neither the trajectory nor the
+         * measurement. See CLAUDE.md, "Physics never reads frame time":
+         * nothing here reaches the integrator, and nothing here reads the
+         * wall clock either.
+         *
+         * OFF THE STAND ONLY. A craft held on the launch stand has its
+         * sticks read and its rates applied, and none of it is flying, so
+         * counting it would put however long the pilot sat on the grid into
+         * the occupancy of a centred stick. Replays are out for the same
+         * reason: a replay is somebody else's hands.
+         */
+        if (rateArmed && !stood && !replayMode && flown > 0) {
+          rateSession.push(
+            (flown * MS_PER_STEP) / 1000,
+            rcHeld,
+            {
+              roll: Math.abs(stateCurr[11]) * RAD_TO_DEG,
+              pitch: Math.abs(stateCurr[12]) * RAD_TO_DEG,
+              yaw: Math.abs(stateCurr[13]) * RAD_TO_DEG,
+            },
+          );
+        }
       }
       /*
        * Ground is a plane in the plant, not a sphere test after the
@@ -11107,6 +11191,30 @@ export async function boot({ loading, bootStart, mapId }) {
       },
       keys: [...input.keys].filter((k) => input.isStickKey(k)).sort(),
       sticks: [r2(ch.roll || 0), r2(ch.pitch || 0), r2(ch.yaw || 0), r2(ch.throttle || 0)],
+    };
+  });
+  /*
+   * WHAT THE RATE SESSION HAS MEASURED, AND THE FIT OVER IT.
+   *
+   * Computed on demand rather than kept up to date, because the only thing
+   * that reads it is a screen a pilot has opened, and fitting a session is
+   * arithmetic over a dozen histograms: once when a room opens is free,
+   * sixty times a second while flying is work nobody can see. The
+   * accumulator is the thing that runs every frame, and all it does is add.
+   *
+   * Null when nothing has been measured, so the room can say so rather than
+   * draw a proposal built out of an empty session.
+   */
+  ui.setRateProbe(() => {
+    if (rateSession.moveSeconds <= 0) {
+      return null;
+    }
+    const stats = rateSession.stats();
+    return {
+      seconds: rateSession.seconds,
+      moveSeconds: rateSession.moveSeconds,
+      stats,
+      fit: fitRates(stats, ui.settings.rates),
     };
   });
   ui.setLatencyProbe(() => ({
