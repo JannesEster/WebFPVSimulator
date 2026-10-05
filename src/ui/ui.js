@@ -4281,6 +4281,48 @@ const BUILDER_CARD = {
  * on and what a menu that has been backed out of returns to. The mode is
  * only set once the gate has been answered, so before that the racing card
  * of the seated aircraft is the standing answer. */
+/*
+ * The title's Rate my Rates row, in words.
+ *
+ * Four states and they are genuinely different things to say: watching but
+ * nothing flown yet, a pass in progress, a run that finished, and a run
+ * that finished after the pilot left the mode, which is the one where the
+ * row is only still there so the undo is reachable.
+ */
+function rateRowValue(measuring, read) {
+  if (!read) {
+    return 'Fly first';
+  }
+  if (read.state === 'done') {
+    return read.why === 'settled' ? 'Settled' : 'Stopped';
+  }
+  if (!measuring) {
+    return `${read.passes.length} pass${read.passes.length === 1 ? '' : 'es'}`;
+  }
+  return read.moveSeconds > 0 ? `Pass ${read.pass}, ${Math.round(read.passProgress * 100)}%` : 'Fly first';
+}
+
+function rateRowNote(measuring, read) {
+  if (!read || (!read.passes.length && !(read.moveSeconds > 0))) {
+    return 'Watching, and nothing measured yet. Fly how you normally fly: hover and hold a line, '
+      + 'then commit to some real moves. It refines your rates a pass at a time as you go.';
+  }
+  if (read.state === 'done') {
+    return read.why === 'settled'
+      ? `It settled after ${read.passes.length} passes and you are flying what it found. Open it for `
+        + 'the numbers, why each one moved, and the row that puts back what you arrived on.'
+      : `It stopped after ${read.passes.length} passes without settling. Open it for what it found, `
+        + 'why it stopped, and the row that puts back what you arrived on.';
+  }
+  if (!measuring) {
+    return `${read.passes.length} pass${read.passes.length === 1 ? '' : 'es'} moved your rates before `
+      + 'you left the mode. This row stays so you can still see what it did and put back what you '
+      + 'arrived on.';
+  }
+  return `Pass ${read.pass} of up to ${read.passLimit}, ${read.moveSeconds.toFixed(0)} seconds of stick `
+    + 'movement in. When it fills your rates change and the next pass measures those.';
+}
+
 /* The ways a pilot can be SEATED on, which is every way that is not a
  * measuring one: see the `measure` note in WAYS for why the cursor must
  * never open on that card. */
@@ -7607,15 +7649,28 @@ export class Ui {
        * opens a room saying "nothing measured yet" is furniture. The card on
        * the gate is the way in from cold.
        */
-      const measured = this.measuring ? (this.rateProbe ? this.rateProbe() : null) : null;
-      const rateRow = this.measuring
+      /*
+       * ON THE LIST WHILE A RUN IS LIVE, AND WHILE ONE HAS LEFT A MARK.
+       *
+       * The second half is a trap being closed rather than a nicety. The row
+       * used to appear only while `measuring`, which goes false the instant
+       * any other card on the gate is pressed. So: run the loop, let it move
+       * your rates across three passes, then press Freestyle because you
+       * want to go flying. The row vanishes, and with it the only door to
+       * the room, and the only way back to the profile you arrived on. The
+       * pilot is left on rates they did not choose with no way to undo them.
+       *
+       * So it also shows while the run has passes behind it, whether or not
+       * the mode is still armed, because the undo has to outlive the mode.
+       */
+      const measured = this.rateProbe ? this.rateProbe() : null;
+      const ranSomething = Boolean(measured && measured.passes && measured.passes.length);
+      const rateRow = (this.measuring || ranSomething)
         ? [{
           label: SCREEN_TITLES.ratemyrates,
-          value: measured && measured.moveSeconds > 0 ? `${measured.moveSeconds.toFixed(0)} s` : 'Fly first',
+          value: rateRowValue(this.measuring, measured),
           action: 'ratemyrates',
-          note: measured && measured.moveSeconds > 0
-            ? `What your hands did over ${measured.moveSeconds.toFixed(0)} seconds of stick movement, what rate profile that asks for, and why. Nothing has changed on the quad.`
-            : 'Watching, and nothing measured yet. Fly: hover and hold a line, then commit to some real moves, and this row will have an answer in it.',
+          note: rateRowNote(this.measuring, measured),
         }]
         : [];
       return [
@@ -9011,8 +9066,25 @@ export class Ui {
        * that anything was being measured at all.
        */
       const live = read.live;
-      const headRow = done
+      /*
+       * A RUN THAT WAS WALKED AWAY FROM is neither finished nor in
+       * progress, and saying either would be wrong. The pilot pressed
+       * another card on the gate, so nothing is being measured, but the
+       * passes that already landed are still on their quad and the undo is
+       * still the thing they are most likely here for.
+       */
+      const left = !read.armed && !done;
+      const headRow = left
         ? {
+          label: 'Run left unfinished',
+          value: `${read.passes.length} pass${read.passes.length === 1 ? '' : 'es'}`,
+          info: true,
+          note: 'You left the mode, so nothing is being measured now. What the passes below set is '
+            + 'still what you are flying. Start a session to carry on from here, or put back what '
+            + 'you arrived on.',
+        }
+        : (done
+          ? {
           label: read.why === 'settled' ? 'Settled' : 'Stopped',
           value: ratesShort(read.rates),
           info: true,
@@ -9038,7 +9110,7 @@ export class Ui {
               + 'When it fills, your rates change and the next pass measures those.'
             : 'Watching, and nothing measured yet. Fly: hover and hold a line, then commit to some '
               + 'real moves. A pass fills on stick movement, so parked time costs you nothing.',
-        };
+        });
 
       const axisRow = (axis, label, from) => ({
         label,
@@ -9066,7 +9138,7 @@ export class Ui {
                 + 'below puts you back if you want it.'),
         },
         ...(read.passes.length ? [{ label: 'Every pass', section: true }, ...passRows] : []),
-        ...(live && !done
+        ...(live && !done && !left
           ? [
             {
               label: 'Pass so far', section: true,
@@ -9085,13 +9157,19 @@ export class Ui {
           ]
           : []),
         { label: 'Then what', section: true },
-        ...(done
+        /* Offered when the run is over AND when it was walked away from,
+         * because the head row in that state tells the pilot to start one
+         * and an instruction with no row under it is worse than silence. */
+        ...(done || left
           ? [{
-            label: 'Run it again',
+            label: left ? 'Start a session' : 'Run it again',
             action: 'ratemyrates-start',
             primary: true,
-            note: 'Starts a fresh run from what you are flying now. Worth doing if this one stopped '
-              + 'rather than settled, and worth doing again in a month: your hands change.',
+            note: left
+              ? 'Puts you back in a freestyle world and starts a fresh run from what you are flying '
+                + 'now, which is where the passes above left you.'
+              : 'Starts a fresh run from what you are flying now. Worth doing if this one stopped '
+                + 'rather than settled, and worth doing again in a month: your hands change.',
           }]
           : []),
         {

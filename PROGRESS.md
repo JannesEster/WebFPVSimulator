@@ -66722,6 +66722,40 @@ the shell applied rather than what was proposed, including when the shell applie
   than five percent, with a note on why two is the honest answer for a fixed rotation pilot rather than a suspiciously
   quick one.
 
+### A trap closed, and the room walked
+
+Found by reading the states rather than the happy path, after the loop was pushed.
+
+**Leaving the mode stranded the undo.** The title's Rate my Rates row appeared only while `ui.measuring`, which goes
+false the instant any other card on the gate is pressed. So: run the loop, let it move the rates across three passes,
+then press Freestyle because you want to go flying. The row vanishes, and with it the only door to the room and the only
+way back to the profile you arrived on. The pilot is left on rates they did not choose with no way to undo them. The row
+now also shows while a run has passes behind it, armed or not, because the undo has to outlive the mode.
+
+Two mirrors of the same bug followed. The room's head row would have said "Pass 2 of up to 6, 40 percent" for a run
+nothing was advancing, and the live "Heading toward" block would have shown an abandoned pass as though it were still
+filling. There is a third state now, `left`, which says the run was walked away from, that what the passes set is still
+what is flying, and offers Start a session. That last part matters because the head row's note tells the pilot to start
+one, and an instruction with no row under it is worse than silence.
+
+Both states were rendered and read back rather than reasoned about, by stubbing the probe through `setRateProbe` in a
+capture, which exercises the render path without flying the 25 seconds a real pass needs:
+
+    measuring, not armed, 2 passes   Run left unfinished = 2 passes, Flying now, Every pass, Pass 1, Pass 2,
+                                     Then what, Start a session, Put my old rates back, Back
+    done, settled                    Settled = Actual 500/500/500, Flying now, Every pass, Pass 1, Pass 2,
+                                     Then what, Run it again, Put my old rates back, Back
+
+**And the room is walked by scripts/shell-check.js now.** It was not in `SCREENS`, so nothing measured whether its rows
+were reachable, whether it overflowed or whether there was a way out. The comment two entries above that list says
+exactly what this costs: the trick list shipped with its entire row list below the fold for that reason. It walks clean,
+3 stops, 3 reached by arrow, 0 px of overflow, 0 px below the fold, escape back to title, and the suite's 11 container
+problems are unchanged. What it does not cover is the long form, whose row count grows with the passes flown, because
+the harness does not fly a session; that is said in the comment rather than left to be assumed.
+
+Also run, all clean and none of them previously run against this change: `lint:nouns` PASS, `lint:boot` 9 of 9,
+`lint:memory` PASS, `lint:frame` 34 of 34, `lint:responsive` PASS, `lint:scale` PASS.
+
 ### Still open
 
 - A pass is 25 seconds of stick movement, which is a guess. Too short and a pass measures noise, too long and nothing
