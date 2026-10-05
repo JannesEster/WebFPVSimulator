@@ -66435,3 +66435,175 @@ Flight feel is unverified: what a pilot sees on a gentle takeoff is the thing th
 The owner's word, 2026-10-05 10:28Z, in the project thread: "push to masin" (main), after the draft PR (#36) with its
 CI green. Covers this entry only: the parked lift change in src/main.js and scripts/takeoff-check.js. Fast forward,
 main had not moved since the branch was cut (72b6dbb).
+
+## 2026-10-05 | fc, shell | Rate my Rates: a fourth card that measures a session and fits a rate profile to it
+
+### The ask, and the licence wall it hit first
+
+The owner asked to integrate WILDTYPE's RateFinder
+(https://github.com/jaydeelocs/WTRateFinder) into this simulator. Read first, built second, and the reading is the
+reason this entry exists in the shape it does.
+
+**RateFinder cannot be integrated, ported, or reimplemented, and the repository makes that explicit.** It is docs only:
+three files, `GETTING_STARTED.md`, `README.md` and `LICENSE.txt`, no source. The licence is RATEFINDER FREEWARE LICENSE
+1.0, and it is not open source. It forbids redistribution of "any component thereof", forbids reverse engineering, and
+forbids derivative works. Its INTELLECTUAL PROPERTY clause then reserves, by name, "its source code, compiled binaries,
+algorithms, rate analysis methodology, calibration exercise designs" and states that "the three-metric analysis
+framework (CPR, CMV, MDI) and the calibration-anchored rate recommendation algorithm are proprietary methods" with "no
+license to these methods granted". It is also a Windows MSI that reads a USB joystick, so there is nothing a browser
+could host even if the licence allowed it.
+
+This repository is GPLv3 and CLAUDE.md says not to add a dependency with an incompatible licence. Reimplementing a
+documented proprietary method into a GPLv3 file would be the licence problem wearing a different hat.
+
+Put to the owner. The answer, 2026-10-05 in the project thread: "if the licencing is a issue we will build our own
+version". Then "lets call it Rate my Rates", and then "I want it as a game mode in the main menue". This entry is those
+three answers. **Nothing in it is derived from RateFinder.** Its name is different, its measurements are chosen for what
+this program can see and a joystick reader cannot, and it asks the pilot to perform no exercises at all, which is both
+the honest design and the one that stays clear of the reserved exercise designs.
+
+Later in the same thread the owner offered to fly their own hands through RateFinder and hand over its output so this
+could "figure out how it got there". Declined, and the reason is written down here because it will come up again:
+working backwards from their output to their method is deriving the method, which is the thing the licence reserves and
+the thing this file has just spent a paragraph not doing. Comparing the two tools' published outputs is fine and anybody
+may do it. Fitting ours toward theirs is not, and it would also throw away the only real advantage ours has.
+
+### What it measures, and why it is not the same kind of thing
+
+A tool that reads a radio sees the sticks and has to infer what the quad did. This runs INSIDE the quad: Betaflight's
+own setpoint and the plant's own gyro are both in process. So "you asked for 1000 deg/s and the airframe gave you 640"
+is a measurement here and a guess anywhere else, and it is the one fact that turns a rate proposal from advice into
+arithmetic. That measurement, `unreachable`, holds a veto over the proposal: a pilot pinned on the stop whose quad
+cannot follow is NOT offered more rate, because the travel it would buy commands a rotation the craft cannot make.
+
+Three fits per axis, each from one measurement, each reported to the pilot with the number behind it:
+
+- **The slope at centre, from the size of the corrections.** A correction is a stick excursion and its return, and its
+  amplitude is how much travel the pilot spent to make the quad do a small thing. Target a tenth of the travel: larger
+  than any hand's noise, smaller than a deliberate placement. Corrections over half the travel are manoeuvres and are
+  excluded.
+- **The rate at the stop, from the rotation actually reached,** at the 99th percentile of time rather than the peak,
+  plus a seventh of headroom, pushed up in proportion to time spent on the stop past a couple of percent, and capped by
+  the airframe's veto above.
+- **Expo, from the share of the session spent between a quarter and seven tenths of the travel,** because that is the
+  stretch of the curve expo shapes and the only stretch it shapes.
+
+Anchored on the profile that was flown, read THROUGH its own curve rather than off its rate rows, so a pilot on any of
+the five rate systems is measured correctly. Proposed in ACTUAL always, because ACTUAL is the only system whose three
+columns are the three things measured: a slope at centre in deg/s, a rate at the stop in deg/s, and where the travel
+went. A Raceflight Acro+ number cannot be measured, only solved for after the deg/s are known.
+
+One session may halve or double an axis and no more, reported when it bites. An axis that was never moved keeps what it
+had, expo included.
+
+**No curve is written in JavaScript.** CLAUDE.md forbids it and this obeys it: every deg/s, the anchor and the proposal
+both, goes through `src/fc/ratescurve.js`, which `npm run lint:fc` F15 already sweeps against the compiled module for
+all five rate types. This file does arithmetic on that function's output and never on a curve of its own.
+
+**The throttle is deliberately not proposed.** The obvious measurement is where the throttle sat, and the number it
+would feed is Betaflight's `thr_mid`, which is where the throttle curve PIVOTS. At the factory `thr_expo` of zero the
+curve is a straight line and the pivot does nothing whatever, so the proposal would be a row that moves beside a quad
+that does not change. Proposing an expo to go with it would be this module deciding how soft a pilot likes their hover,
+which is a taste and not a measurement. `configs/rates.js` already states where hover lands on the stick at every
+throttle cap, measured off the plant by `scripts/flightcheck.js`, and the Rates screen already prints it.
+
+### What changed
+
+**`src/fc/ratemyrates.js`, new.** The accumulator and the fit. Fixed memory: nothing is stored per sample, every
+measurement is a histogram or a running total in an array allocated once, so an hour costs what a minute does. Time
+weighted, so the answer does not depend on the frame rate. Not in the physics path and it does not touch the DOM.
+
+**`src/main.js`.** Feeds it from the physics loop beside `flightLog.push`, weighted by SIMULATED time (`flown *
+MS_PER_STEP`) rather than frame time, which makes the frame rate independence exact rather than approximate: the
+integrator takes the same 1 ms steps for the same flight whatever the browser does. Off the launch stand only, replays
+excluded. Armed on the rising edge of `ui.measuring`, reset when the rates move under it. The fit is computed on demand
+in the probe, not per frame. `window.__rateMyRates()` for the harness.
+
+**`src/ui/ui.js`.** A fourth card in `WAYS`, carrying a `measure` flag, which `seatedWay` now skips so the cursor never
+opens a tuning utility on a pilot who came to fly. The room behind it: read only rows, two verbs, and nothing reaching
+the quad until Take these rates is pressed, which hands over to the Rates screen where the numbers are editable and the
+curve is drawn. A row into the room on the title while a session is live.
+
+**`scripts/gatecards.js`, `assets/gate/ratemyrates.jpg`.** The card's picture, generated like the other four. The same
+town as the freestyle card but from down in the street rather than over the roofs, because that card is about where you
+are going and this one is about what your hands are doing.
+
+**`scripts/shell-check.js`, `scripts/input-check.js`.** Both pinned the gate's card list as a string and the builder's
+index as 3. Updated to the new five with the date and the reason. This is a change to what the product IS, not a
+threshold moved to make a check pass, and the evidence it still bites is below.
+
+**`scripts/ratemyrates-check.js`, new, `npm run check:ratemyrates`.** 46 checks, synthetic pilots with analytic answers.
+
+### Checks
+
+    npm run check:ratemyrates   all 46 passed
+    npm run lint:fc             33 of 33 traces clean
+    npm run lint:presets        4 of 4 presets clean
+    npm run lint:shell          11 problems, BYTE IDENTICAL to the same command on main with this branch stashed,
+                                so none of them are this change's. They are this container's font metrics and a board
+                                that is not running here (the run logs 13 refused fetches). Diffed the two logs: empty.
+    npm run lint:catalog        fails here and fails identically on main: vendor/betaflight is an unchecked out
+                                submodule in this container, so the parameter_names.h it reads does not exist.
+    npm run verify              not run. No physics, plant, module ABI or build change: the accumulator observes the
+                                state block and writes nothing, and no file under src/native/, patches/ or
+                                vendor/betaflight was touched. Said plainly because an unrun check is not evidence.
+
+The gate assertions were proved to bite rather than assumed to. Running this branch's UI against main's OLD
+`shell-check.js` fails exactly three gate assertions and reports the card list it saw:
+`race.jpg, whoop.jpg, freestyle.jpg, ratemyrates.jpg, builder.jpg`, with `ratemyrates` carrying its plan drawing and
+`builder` last without one. So the section runs, it sees the new card, and the updated expectation is the only thing
+that changed.
+
+`check:ratemyrates` was mutation tested, because a suite that passed first time deserves suspicion. Each of these
+mutations is caught:
+
+- the airframe veto removed: "a pilot on the stop whose quad cannot is not" fails, 710 against 670.
+- the anchor read off the `rcRate` row instead of off the curve: the Betaflight default anchors at 1000 instead of 203.
+- intervals replaced by a constant, so samples are counted rather than weighted: the variable frame interval check
+  fails by three uint8 steps.
+
+Flight feel is NOT verified and cannot be from here. Whether the profile this proposes is a profile worth flying is a
+pilot's judgement, and the owner has offered to fly it.
+
+### What went wrong
+
+Four things, three of them found only by running it.
+
+- **The room was blank.** The screen id, its title, its crumb, its rows and its actions all landed, and `renderMenu`
+  looks a screen up in a map of DOM hosts that had no entry for it. It drew the crumb and the command bar over an empty
+  page. Everything worked except that the room was invisible. A screen in this shell is four things and the DOM host is
+  the fourth; there is now a paragraph saying so where the host is built.
+- **A crash sized the rate profile.** Flown through the town for twelve seconds including a building and the tumble
+  after it, the first build proposed DOUBLE the rate on all three axes, yaw included, on a session whose yaw stick
+  never left six tenths of travel. `reach` is a percentile of time, and a second of cartwheel in a twelve second
+  session sits far above the one percent tail that percentile was chosen to discard. Rotation is now counted only when
+  it is plausibly the rotation that was commanded, and the discarded share is reported rather than hidden.
+- **The first version of that filter threw away every reversal.** Comparing the instantaneous demand against the
+  instantaneous gyro, a roll reversal passes through centre stick with the quad still turning at 600 deg/s, and an
+  instantaneous reading calls that uncommanded when it is the exact opposite. Measured: 2.4 percent of a committed
+  pilot's session discarded, and 3.4 percent of one whose stick crossed in a realistic 80 ms, which is worse because a
+  slower crossing spends longer near centre. The temptation was to widen the band from 2 percent to 4. That is the one
+  thing CLAUDE.md forbids outright. Fixed properly instead, by comparing against a decaying held peak of the demand, so
+  what the pilot asked for in the last quarter second is what the quad is allowed to still be doing. The realistic
+  stick now loses 0.00 percent and the tumbler still loses 20.
+- **The correction median carried half a bin of bias.** Corrections are events, not time, and a hover produces hundreds
+  of them at nearly one size, so interpolating inside a 5 percent bin returned the bin's centre whatever the events
+  were: a pilot's 10 percent corrections read as 12.5, and the centre fit is the one thing resting entirely on that
+  number. Corrections now have their own histogram at half a percent of travel.
+- And the frame rate check passed for the wrong reason at first. Two constant frame rates sample the same distribution,
+  so replacing every interval with a constant left both the 60 Hz and the 144 Hz proposals completely unchanged; the
+  only thing it broke was the seconds on the confidence row. What sample counting actually breaks is an interval that
+  MOVES WITH THE FLYING, which is the normal case rather than the pathological one, because the fast parts of a session
+  are the parts with the most on screen. That is what the check measures now, and the subject pilot is asserted to be
+  clear of the step clamp first, since a clamped proposal agrees with itself at any frame rate.
+
+### Still open
+
+- The whoop is not offered. The card seats the five inch because that is the machine pilots tune for, and nothing in
+  the fit is five inch specific, so a second card or an aircraft row is a small change if it is wanted.
+- Confidence is seconds of stick movement, and a keyboard pilot accrues them slowly because a keyboard's stick is at
+  centre whenever no key is held. A gamepad pilot will read "high" on a flight where a keyboard pilot reads "low" on
+  the same wall clock. Honest, since it genuinely is less stick data, but worth a note on the row if it confuses
+  anybody.
+- Nothing is saved. The proposal lives until the next session and the preset library is reached by hand through the
+  Rates screen. A "save this as a preset" row in the room itself would skip a step.
