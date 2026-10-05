@@ -5478,6 +5478,43 @@ export class Ui {
     this.screens.rates = rates;
 
     /*
+     * RATE MY RATES: what the session measured, and what it asks for.
+     *
+     * WHY IT IS ITS OWN SCREEN AND NOT A SECTION OF THE ONE ABOVE. Rates is
+     * a room where every row writes to the quad. Every row here is a
+     * MEASUREMENT, and nothing in it is editable: a reading a pilot could
+     * type over would not be a reading. Putting the two in one room would
+     * put editable and read-only rows in one list, and the pilot's only clue
+     * about which was which would be that some of them refuse the arrows.
+     *
+     * It wears screen-pilot's plain page styling rather than Rates' own,
+     * because Rates' layout exists to seat the curve panel in its first
+     * column and this room has no panel. The curve belongs on the screen
+     * where the numbers can be changed, which is where Take these rates
+     * hands over to.
+     *
+     * NO HOST, NO ROWS, and that is why this block exists at all. The first
+     * version of this feature added the screen id, its title, its crumb, its
+     * rows and its actions, and skipped this: renderMenu looks the screen up
+     * in a map of DOM hosts, found nothing, and drew the room's crumb and
+     * its command bar over an empty page. Everything worked except that the
+     * room was blank. A screen is four things and this is the fourth.
+     */
+    const rmr = el('div', 'screen screen-page screen-pilot screen-ratemyrates');
+    rmr.append(el('h2', null, SCREEN_TITLES.ratemyrates));
+    rmr.append(el(
+      'p',
+      'rates-lede',
+      'What your hands did, and the rate profile that asks for. Nothing here changes the quad until you take it.',
+    ));
+    const rmrBlock = wrapMenu();
+    this.rateMyRatesMenu = rmrBlock.menu;
+    this.rateMyRatesMenu.classList.add('menu-scroll');
+    this.rateMyRatesHelp = rmrBlock.help;
+    rmr.append(rmrBlock.stage);
+    this.screens.ratemyrates = rmr;
+
+    /*
      * PIDs.
      *
      * THE HALF OF THE FLIGHT-CONTROLLER SCREEN THAT WAS MISSED. Removing
@@ -9438,6 +9475,7 @@ export class Ui {
       launch: this.launchMenu,
       standings: this.standingsMenu,
       rates: this.ratesMenu,
+      ratemyrates: this.rateMyRatesMenu,
       pids: this.pidsMenu,
       fc: this.fcMenu,
       paused: this.pausedMenu,
@@ -9854,6 +9892,7 @@ export class Ui {
       launch: this.launchHelp,
       standings: this.standingsHelp,
       rates: this.ratesHelp,
+      ratemyrates: this.rateMyRatesHelp,
       pids: this.pidsHelp,
       fc: this.fcHelp,
       paused: this.pausedHelp,
