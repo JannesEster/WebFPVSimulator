@@ -65,6 +65,7 @@ import { PAD_CALM } from './input/padgate.js';
 import { mountTouchSticks, touchWanted } from './input/touchsticks.js';
 import { RcLink, LINK_DEFAULT, LINK_PRESETS } from './input/link.js';
 import { FlightRecorder, downloadText, flightLogName } from './share/flightlog.js';
+import { PASS_LIMIT, RateCoach } from './fc/ratemyrates.js';
 import { PRACTICE_LAPS, Race, runComplete } from './game/race.js';
 import { TrickDetector } from './game/trickdetect.js';
 import { deriveObstacles, OB_BAR, OB_POLE } from './game/obstacles.js';
@@ -114,7 +115,7 @@ import { MAP_PRELOAD } from './maps/preload.js';
 import { TUNES, tuneById, tunePath } from '../configs/registry.js';
 import { airframeById, simIdFor } from '../configs/airframes.js';
 import { buildWhoopCraft } from './render/whoopcraft.js';
-import { hoverStickPercent, normaliseRates, ratesAreDefault, ratesDiff, ratesSummary, TOUCH_RATE_DEFAULTS } from '../configs/rates.js';
+import { hoverStickPercent, normaliseRates, ratesAreDefault, ratesDiff, ratesShort, ratesSummary, TOUCH_RATE_DEFAULTS } from '../configs/rates.js';
 import { clearPidsFor, PID_AXES, pidCliKey, pidsDiffFor, SLIDER_KEYS, SLIDERS } from '../configs/pids.js';
 import { cliMap, composeConfig, moduleDump, moduleGet, RATES_KEEP, ratesFromDump, readFcDump, tuneBody, writeFcDump } from './fc/dump.js';
 import { GATE_SCALE } from './game/track.js';
@@ -362,6 +363,10 @@ const RC_HZ = 250;
  */
 const SIM_HZ = 1000;
 const MS_PER_STEP = 1000 / SIM_HZ;
+/* The state block's body rates are rad/s and every reader of them that
+ * shows a pilot a number wants deg/s. src/share/flightlog.js writes the
+ * same factor inline for its gyro columns. */
+const RAD_TO_DEG = 57.29577951308232;
 /*
  * How near a wall a Wall Ride is flown, in metres.
  *
@@ -450,7 +455,7 @@ const AXIS_X = new THREE.Vector3(1, 0, 0);
  * alone. The entry is written out because it has moved with the directory:
  * it was three before looks.js came and four before egg.js, and with no
  * entry then the bar sat at 75 percent until the import resolved. */
-const MAP_MODULE_COUNT = { field: 1, city: 72, custom: 1, built: 5 };
+const MAP_MODULE_COUNT = { field: 1, city: 72, custom: 1, built: 5, ratelab: 1 };
 /* Where a map's modules live, so the loading bar can count them. Data, not a
  * ternary: the ternary read "field or else city", so a third map counted its
  * modules under the city's prefix and the bar sat at zero.
@@ -464,6 +469,7 @@ const MAP_MODULE_PREFIX = {
   city: '/src/maps/city/',
   custom: '/src/maps/custom',
   built: '/src/maps/built/',
+  ratelab: '/src/maps/ratelab',
 };
 
 /*
@@ -731,7 +737,39 @@ export async function boot({ loading, bootStart, mapId }) {
   let sessionFlightTimeMs = 0;
   let lastFlightTick = 0;
   let sessionTimePromptShown = false;
+  /* Set in the air when the clock passes the line, and spent on the next
+   * pause or results screen, which is where the prompt is shown. */
+  let sessionTimePromptDue = false;
   const SESSION_TIME_PROMPT_MS = 20 * 60 * 1000; /* 20 minutes */
+  /*
+   * THE PROMPT ON SCREEN, and the screen it was shown on. It goes the
+   * moment that screen is left: "never during a run", and a pilot on a
+   * radio or a pad has no pointer to close it with, so a prompt left up
+   * over the flight would stay there. Settings on it opens the Advanced
+   * room, where the switch for these is. A prompt that fails says nothing
+   * and stops nothing: it is shown from the frame loop and from the post
+   * path, and a throw in either is a fault or a lap reported as not posted.
+   */
+  let supportPrompt = null;
+  let supportPromptScreen = null;
+  const offerSupport = (trigger) => {
+    /* A lap posts while the pilot may already be flying again. */
+    if (ui.settings.supportPrompts === false || ui.screen === 'flight') {
+      return;
+    }
+    try {
+      const prompt = showSupportPrompt(trigger, { onSettings: () => { ui.act('advanced'); } });
+      if (prompt) {
+        if (supportPrompt) {
+          supportPrompt.remove();
+        }
+        supportPrompt = prompt;
+        supportPromptScreen = ui.screen;
+      }
+    } catch (promptError) {
+      console.warn('support prompt', promptError);
+    }
+  };
   /*
    * The last flush, sent when the page goes away. pagehide rather than
    * unload, because a browser that put this tab in its back/forward cache
@@ -882,6 +920,13 @@ export async function boot({ loading, bootStart, mapId }) {
    * sleeps, and a player who is told "Renderer" while the board wakes up
    * will go looking for the wrong problem.
    */
+  /* A race map with no track of its own asks the board for one. The Rate
+   * Lab carries its course in the repository, so an empty builder seat must
+   * not throw it away for the most flown track. */
+  function needsASeatedTrack(id) {
+    const entry = mapById(id);
+    return entry.mode !== 'freestyle' && !entry.ownCourse && !hasFlyableTrack();
+  }
   loading.start('board');
   try {
     const fromUrl = await adoptShareFromLocation();
@@ -901,7 +946,7 @@ export async function boot({ loading, bootStart, mapId }) {
       ui.seatCraftForDoc(fromUrl.document);
       ui.settings.map = 'custom';
       ui.renderMenu();
-    } else if (mapById(ui.settings.map).mode !== 'freestyle' && !hasFlyableTrack()) {
+    } else if (needsASeatedTrack(ui.settings.map)) {
       const featured = await adoptMostFlownTrack(airframeById(ui.settings.airframe).trackClass);
       if (featured) {
         ui.settings.map = 'custom';
@@ -2657,6 +2702,65 @@ export async function boot({ loading, bootStart, mapId }) {
    * quad's log go through the same parser and the same report.
    */
   const flightLog = new FlightRecorder();
+  /*
+   * THE RATE MY RATES ACCUMULATOR, which is always allocated and only ever
+   * fed while the card is up.
+   *
+   * ALWAYS ALLOCATED, because unlike the flight recorder beside it this
+   * costs nothing to have: it is a handful of fixed arrays, about ten
+   * kilobytes, and it does not grow with the length of the flight. See
+   * src/fc/ratemyrates.js on fixed memory.
+   *
+   * ONLY FED WHILE MEASURING, because a session is a thing a pilot started.
+   * `ui.measuring` is set by the gate card and cleared by every other card,
+   * and the rising edge is what resets the accumulator, so pressing the card
+   * is what begins a fresh measurement.
+   *
+   * RESET WHEN THE RATES MOVE UNDER IT, because the fit is a change FROM the
+   * profile that was flown and a flight measured against two profiles is two
+   * flights. The session knows; it does not reset itself, because a silent
+   * restart is a session the pilot thinks they flew.
+   */
+  const rateCoach = new RateCoach(ui.settings.rates);
+  let rateArmed = false;
+  /*
+   * A FINISHED PASS, WAITING FOR A FRAME BOUNDARY TO BE APPLIED ON.
+   *
+   * The coach notices a pass is full inside the physics block, and applying
+   * rates means sim_init, which resets every parameter group and re-seats
+   * the craft (see the rates branch of applySettings). Doing that halfway
+   * through a frame would invalidate the two states the renderer is about
+   * to interpolate between, so the frame would draw a pop. Flagged here and
+   * handled at the TOP of the next frame, before anything has been stepped
+   * or read, which is the same moment a settings change from a menu lands.
+   */
+  let ratePassReady = false;
+  /* Wall clock when the feel question may open, and the sentence it adds.
+   * Set when a pass lands, cleared when it opens or the mode is left.
+   * Thirty seconds is what the owner asked for: long enough to fly the new
+   * rates off the grid, short enough that the pass is still the subject. */
+  /* True while the yes or no about the new rates is on screen. The
+   * proposal is already on the quad. Answering yes keeps it and stops.
+   * Answering no puts the previous profile back. A rates change during
+   * the question is this, not the pilot editing a row. */
+  let rateVerdictOpen = false;
+  let rateAskReady = false;
+  let rateBefore = null;
+  let ratePrompt = 'Fly one lap on these rates. They change after the lap, and you fly the new ones before anyone asks.';
+  /*
+   * TRUE ONLY WHILE THE COACH'S OWN RATES CHANGE IS IN FLIGHT.
+   *
+   * A separate flag from ratePassReady, and the separation is a bug fix.
+   * The two facts are not the same: ratePassReady means "a pass has filled",
+   * and what the settings path needs to know is "the rates change you are
+   * being handed is mine, not the pilot's". They were one flag, cleared one
+   * line before applySettings rather than after it, so the guard that exists
+   * to stop the coach reading its own output as the pilot moving a row was
+   * open at exactly the moment it was needed. Every pass reset the run, the
+   * pass counter never reached two, and the loop silently did nothing for
+   * the whole of its first evening. See PROGRESS.md 2026-10-05.
+   */
+  let rateApplying = false;
   /*
    * Stick samples waiting for an RC slot, and the value currently held.
    *
@@ -5322,7 +5426,7 @@ export async function boot({ loading, bootStart, mapId }) {
         /* Any freestyle world, not only the town: a pilot seated on Your
          * map has no race track to be missing, and adopting one here would
          * move them off the map they chose. */
-        if (mapById(s.map).mode !== 'freestyle' && !hasFlyableTrack()) {
+        if (needsASeatedTrack(s.map)) {
           adoptMostFlownTrack(wantCls).then((got) => {
             if (!got) {
               return;
@@ -5470,7 +5574,21 @@ export async function boot({ loading, bootStart, mapId }) {
         configText = nextText;
         race.setRecordKey(recordKey());
         ui.setBest(race.bestMs, view.mode);
-        reseatAfterConfigSwap(before);
+        /*
+         * A PASS GOES BACK TO THE GRID. The fit compares this pass with the
+         * last, and two passes are only the same kind of flying if they
+         * start from the same place. A manual edit on the Rates screen still
+         * re-seats where the craft was: that path is a pilot tuning one
+         * corner, and this path is the loop. reset() also re-latches the
+         * pack from the setting, so every pass starts on a fresh pack of
+         * the charge they chose. That is the comparison, decided with the
+         * return to the grid rather than left as a surprise.
+         */
+        if (rateApplying) {
+          reset();
+        } else {
+          reseatAfterConfigSwap(before);
+        }
       } else if (sim.init(configText) === SIM_OK) {
         /* Back to the config that worked, and put the craft back on it. The
          * failed attempt moved the module underneath the craft, and a
@@ -5521,6 +5639,58 @@ export async function boot({ loading, bootStart, mapId }) {
     }
     if (flightLog.on !== s.flightLog) {
       flightLog.setEnabled(s.flightLog);
+    }
+    /*
+     * THE RATE SESSION, ARMED ON THE EDGE AND RESET WHEN THE RATES MOVE.
+     *
+     * Two separate reasons to start over, and they are deliberately not one
+     * branch, because the pilot is told different things about them.
+     *
+     *   The EDGE. `ui.measuring` goes true when the Rate my Rates card is
+     *   pressed and false when any other card is, so pressing the card is
+     *   what starts a fresh measurement. Pressing it again starts another
+     *   one, which is what the room's "Start again" row does.
+     *
+     *   The RATES. The fit is a change from the profile that was flown, so a
+     *   flight measured half on one profile and half on another is not a
+     *   measurement of either. Taking a proposal, or nudging one row on the
+     *   Rates screen, lands here and starts the next session against the new
+     *   numbers, which is exactly the loop that converges: fly, take, fly
+     *   again. The room says so on its "Flying now" row.
+     */
+    const wantRate = Boolean(ui.measuring);
+    if (wantRate !== rateArmed) {
+      const starting = wantRate && !rateArmed && flownThisRun;
+      rateArmed = wantRate;
+      rateCoach.reset(s.rates);
+      /* A track pass ends on a lap. The node checks leave this off and still
+       * end a pass on stick time, because they have no gates to cross. */
+      rateCoach.waitForLap = rateArmed;
+      ratePassReady = false;
+      ratePrompt = 'Fly one lap on these rates. They change after the lap, and you fly the new ones before anyone asks.';
+      /* They pressed the button in the air, so the grid line is already
+       * gone. Say the same thing the grid would have said. */
+      if (starting) {
+        notice = { text: ratePrompt, untilMs: performance.now() + 8000 };
+      }
+    } else if (rateArmed && !rateApplying && !rateVerdictOpen && rateCoach.staleFor(s.rates)) {
+      /*
+       * THE PILOT MOVED THE RATES UNDER A RUN, so the pass in progress is
+       * void and the run is not.
+       *
+       * NOT THE COACH'S OWN APPLY. Applying a pass IS a rates change and
+       * lands in this very branch, so rateApplying is what tells the two
+       * apart. It has to be a flag of its own: this guard used to read
+       * ratePassReady, which the apply block cleared one line too early, so
+       * the coach read its own output as the pilot's edit and reset the run
+       * on every single pass. The counter never reached two.
+       *
+       * AND restartPass, NOT reset. reset starts a new RUN and moves
+       * `opening`, which is the undo target, so a pilot three passes in who
+       * nudged one number would have been offered a put-it-back that put
+       * them back to what those three passes had already done to them.
+       */
+      rateCoach.restartPass(s.rates);
     }
     audio.setLevel(s.volume / 10);
     audio.setEnabled(s.sound);
@@ -5812,20 +5982,10 @@ export async function boot({ loading, bootStart, mapId }) {
       };
       ui.markTimePosted(posted);
       /* Show support prompt on new personal best, if enabled. The lap is on
-       * the board by here, so a prompt that fails says nothing: the catch
-       * below would tell the pilot the time had not posted. */
-      if (newBest && ui.settings.supportPrompts !== false) {
-        try {
-          const container = document.querySelector('.screen-results') || document.body;
-          const prompt = showSupportPrompt('pb', container);
-          if (prompt) {
-            prompt.onSettingsClick = () => {
-              ui.act('advanced');
-            };
-          }
-        } catch (promptError) {
-          console.warn('support prompt', promptError);
-        }
+       * the board by here, so a prompt that fails says nothing (offerSupport):
+       * the catch below would tell the pilot the time had not posted. */
+      if (newBest) {
+        offerSupport('pb');
       }
     } catch (e) {
       notice = { text: `Could not post that time.\n${e.message ?? e}`, untilMs: performance.now() + 3600 };
@@ -7232,6 +7392,20 @@ export async function boot({ loading, bootStart, mapId }) {
   };
 
   /*
+   * WHETHER THE STICK GIMBALS ARE UP, asked in one place. The frame loop
+   * draws them on this answer and the target mark parks clear of them on
+   * the same answer, so the two cannot disagree. They did once: the Stick
+   * overlay setting first moved only the drawing from "a keyboard pilot" to
+   * "any pilot not on the thumb sticks", the mark kept parking for the
+   * keyboard alone, and a radio pilot's chevron went back to landing on the
+   * roll and pitch gimbal, which is the bug AIM_MARGIN_BOTTOM above records.
+   * The thumb plates are the sticks, so they never get a second pair.
+   */
+  function stickOverlayUp() {
+    return ui.settings.stickOverlay !== false && !input.isTouchPrimary();
+  }
+
+  /*
    * Put the target mark where the next gate is.
    *
    * The map owns which gate that is and which side of it the pilot is on,
@@ -7293,10 +7467,10 @@ export async function boot({ loading, bootStart, mapId }) {
     const maxX = vw - AIM_MARGIN;
     const minY = AIM_MARGIN_TOP;
     /* Whichever of the two the frame is currently showing. isTouchPrimary
-     * moves the corner blocks to the bottom centre; the keyboard ghost puts
+     * moves the corner blocks to the bottom centre; the stick overlay puts
      * the gimbals there. Either way the bottom band is taller than the
      * corner instruments alone. */
-    const bottomBand = (input.isKeyboardPrimary() || input.isTouchPrimary())
+    const bottomBand = (stickOverlayUp() || input.isTouchPrimary())
       ? AIM_MARGIN_BOTTOM_STICKS
       : AIM_MARGIN_BOTTOM;
     const maxY = vh - bottomBand;
@@ -7530,6 +7704,108 @@ export async function boot({ loading, bootStart, mapId }) {
       prevWall = nowWall;
       return;
     }
+    /*
+     * A FINISHED RATE PASS, APPLIED HERE AND NOWHERE ELSE.
+     *
+     * Before anything is stepped or read this frame, because applying it is
+     * a sim_init and a re-seat. See ratePassReady.
+     *
+     * THIS IS THE WHOLE OF THE SELF IMPROVING LOOP, and it is four lines
+     * because the hard parts are elsewhere: the coach decides when a pass
+     * is full and what the next profile is, and the ordinary settings path
+     * does the applying, exactly as it does when a pilot moves a row on the
+     * Rates screen. Nothing new reaches the module and no second way of
+     * writing a rate profile exists.
+     *
+     * WHY CHANGING THE RATES MID FLIGHT IS NOT RUDE HERE, when the Rates
+     * screen warns about it. The pilot pressed a card that exists to retune
+     * them, so the change is the mechanism rather than a surprise. The pass
+     * puts the craft back on the grid, because the next pass has to be the
+     * same kind of flying as this one. A manual edit still re-seats where
+     * the craft was. They are told each time a pass lands, the room shows
+     * every pass, and the profile they arrived on is kept so it can be put
+     * back.
+     */
+    if (ratePassReady && !rateVerdictOpen && !rateAskReady) {
+      const pass = rateCoach.pending();
+      if (pass) {
+        /* The lap that just finished was flown on THESE rates. The proposal
+         * goes on now, and the question waits until a lap has been flown on
+         * the new ones. Asking here is how the last version told a pilot
+         * how rates felt that they had never tried. */
+        const before = normaliseRates(ui.settings.rates);
+        if (ratesDiff(before) === ratesDiff(pass.rates)) {
+          rateCoach.releasePass();
+          ratePrompt = 'No change from that lap. Fly another and it will look again.';
+          notice = {
+            text: 'No change from that lap.\nYou were already on the line. Fly another.',
+            untilMs: performance.now() + 6000,
+          };
+        } else {
+          rateBefore = before;
+          rateApplying = true;
+          ui.settings.rates = normaliseRates(pass.rates);
+          ui.persistSettings();
+          applySettings(ui.settings);
+          rateApplying = false;
+          rateCoach.beginTrial(ui.settings.rates);
+          const why = pass.notes && pass.notes.roll ? pass.notes.roll : '';
+          ratePrompt = 'New rates are on. Fly a full lap on them. The question comes after that lap.';
+          notice = {
+            text: `New rates are on. Fly a full lap on them.\n${ratesShort(ui.settings.rates)}`,
+            untilMs: performance.now() + 7000,
+          };
+          if (why) {
+            notice.text += `\n${why.split('. ')[0]}.`;
+          }
+        }
+      }
+      ratePassReady = false;
+    }
+    if (rateAskReady && !rateVerdictOpen) {
+      rateAskReady = false;
+      rateVerdictOpen = true;
+      const measureMs = rateCoach.measureLapMs;
+      const trialMs = rateCoach.trialLapMs;
+      reset();
+      ui.askRateVerdict({ measureMs, trialMs }).then((answer) => {
+        rateVerdictOpen = false;
+        const put = (next, prompt, text) => {
+          rateApplying = true;
+          ui.settings.rates = normaliseRates(next);
+          ui.persistSettings();
+          applySettings(ui.settings);
+          rateApplying = false;
+          ratePrompt = prompt;
+          notice = { text, untilMs: performance.now() + 6000 };
+        };
+        if (answer === 'sluggish') {
+          const next = rateCoach.feelNudge({ rc: 1, sr: 2, expo: 0 });
+          put(next, 'A bit more rate. Fly a lap on it.',
+            `Too sluggish, so centre and full stick come up one step.\n${ratesShort(ui.settings.rates)}`);
+        } else if (answer === 'twitchy') {
+          const next = rateCoach.feelNudge({ rc: 0, sr: -2, expo: 5 });
+          put(next, 'A bit less at full stick. Fly a lap on it.',
+            `Too twitchy, so full stick comes down and a little expo goes on.\n${ratesShort(ui.settings.rates)}`);
+        } else if (answer === 'better' && rateCoach.lastFeel
+          && (rateCoach.lastFeel.rc || rateCoach.lastFeel.sr || rateCoach.lastFeel.expo)) {
+          const next = rateCoach.feelNudge(rateCoach.lastFeel);
+          put(next, 'One more step the same way. Fly a lap on it.',
+            `One more step the same way.\n${ratesShort(ui.settings.rates)}`);
+        } else {
+          rateCoach.anotherLap();
+          ratePrompt = 'Same rates. Fly another lap, then say how they feel.';
+          notice = {
+            text: 'Same rates.\nFly another lap, then say how they feel.',
+            untilMs: performance.now() + 6000,
+          };
+        }
+        ui.renderMenu();
+      });
+    }
+    if (!rateArmed) {
+      rateVerdictOpen = false;
+    }
     const blockStart = performance.now();
     const dt = Math.min(nowWall - prevWall, 100);
     prevWall = nowWall;
@@ -7563,8 +7839,9 @@ export async function boot({ loading, bootStart, mapId }) {
         laps: race.laps.length,
       });
       
-      /* Track session flight time for support prompt at 20 minutes */
-      if (flownThisRun && !landed && !turtleWait && !turtleRecover) {
+      /* Track session flight time for support prompt at 20 minutes. In
+       * flight: a pause holds the craft in the air, and was counted. */
+      if (flownThisRun && !landed && !turtleWait && !turtleRecover && ui.screen === 'flight') {
         const was = lastFlightTick;
         lastFlightTick = nowWall;
         if (was > 0 && nowWall > was) {
@@ -7580,23 +7857,21 @@ export async function boot({ loading, bootStart, mapId }) {
               && ui.settings.supportPrompts !== false
               && ui.screen === 'flight') {
             sessionTimePromptShown = true;
-            /* Wait until the next pause or results screen to show the prompt */
-            const showPromptOnPause = () => {
-              if (ui.screen === 'paused' || ui.screen === 'results') {
-                const container = document.querySelector('.screen-paused, .screen-results') || document.body;
-                const prompt = showSupportPrompt('time', container);
-                if (prompt) {
-                  prompt.onSettingsClick = () => {
-                    ui.act('advanced');
-                  };
-                }
-              }
-            };
-            /* Check on the next frame */
-            setTimeout(showPromptOnPause, 100);
+            sessionTimePromptDue = true;
           }
         }
       }
+      /* Shown when the pilot next stops. It used to look once, 100 ms
+       * after the line, when the pilot was still flying, so it never showed. */
+      if (sessionTimePromptDue && (ui.screen === 'paused' || ui.screen === 'results')) {
+        sessionTimePromptDue = false;
+        offerSupport('time');
+      }
+    }
+    if (supportPrompt && (ui.screen !== supportPromptScreen || !supportPrompt.isConnected)) {
+      supportPrompt.remove();
+      supportPrompt = null;
+      supportPromptScreen = null;
     }
 
     /* The seated world's note, released on the first frame of a flight and
@@ -8011,6 +8286,52 @@ export async function boot({ loading, bootStart, mapId }) {
         /* Launch stand constraint runs inside sim_step. Ground contact
          * runs after plant_step at 1 kHz when the plane is raised. */
         flightLog.push(stateCurr, rcHeld, FULL_THROTTLE_RPM);
+        /*
+         * AND THE RATE MEASUREMENT, WEIGHTED BY SIMULATED TIME.
+         *
+         * `flown * MS_PER_STEP` is how long the craft actually flew this
+         * frame, not how long the frame took, and that distinction is the
+         * whole reason this line is here rather than in the render loop.
+         * The accumulator has to be weighted by time or a 144 Hz machine
+         * measures a different pilot from a 60 Hz one, and SIMULATED time
+         * makes that exact rather than approximate: the integrator takes
+         * the same number of 1 ms steps for the same flight whatever the
+         * browser is doing, so the weighting does not depend on the frame
+         * rate at all. A dropped frame moves neither the trajectory nor the
+         * measurement. See CLAUDE.md, "Physics never reads frame time":
+         * nothing here reaches the integrator, and nothing here reads the
+         * wall clock either.
+         *
+         * OFF THE STAND ONLY. A craft held on the launch stand has its
+         * sticks read and its rates applied, and none of it is flying, so
+         * counting it would put however long the pilot sat on the grid into
+         * the occupancy of a centred stick. Replays are out for the same
+         * reason: a replay is somebody else's hands.
+         */
+        if (rateArmed && !ratePassReady && !rateAskReady && !stood && !replayMode && flown > 0) {
+          if (view && view.racingLine && rateCoach.lineId !== view.id) {
+            rateCoach.setLine(view.racingLine);
+            rateCoach.lineId = view.id;
+          }
+          poseFromState(stateCurr, pProbe);
+          rateCoach.push(
+            (flown * MS_PER_STEP) / 1000,
+            rcHeld,
+            {
+              roll: Math.abs(stateCurr[11]) * RAD_TO_DEG,
+              pitch: Math.abs(stateCurr[12]) * RAD_TO_DEG,
+              yaw: Math.abs(stateCurr[13]) * RAD_TO_DEG,
+            },
+            {
+              x: pProbe.x,
+              z: pProbe.z,
+              speed: Math.hypot(stateCurr[4], stateCurr[5]),
+            },
+          );
+          if (rateCoach.pending()) {
+            ratePassReady = true;
+          }
+        }
       }
       /*
        * Ground is a plane in the plant, not a sphere test after the
@@ -8418,6 +8739,14 @@ export async function boot({ loading, bootStart, mapId }) {
            * on the last lap of one too, which the results screen covers but
            * the ear still hears. Read off the entry the flash was written
            * from, so the voice and the screen say the same lap. */
+          if (rateArmed && !rateVerdictOpen && race.laps.length > lapsBefore) {
+            const kind = rateCoach.lapFinished(race.lastLapMs);
+            if (kind === true) {
+              ratePassReady = true;
+            } else if (kind === 'ask') {
+              rateAskReady = true;
+            }
+          }
           if (race.laps.length > lapsBefore && ui.settings.sound) {
             lapVoice.say(
               lapCall(race.log.length, race.lastLapMs, race.lastLapRecord),
@@ -9335,7 +9664,7 @@ export async function boot({ loading, bootStart, mapId }) {
       const ch = input.channels;
       const vis = turtleAxes(ch.roll, ch.pitch);
       ui.setStickOverlay({
-        show: input.isKeyboardPrimary() && !input.isTouchPrimary(),
+        show: stickOverlayUp(),
         roll: vis[0],
         pitch: vis[1],
         yaw: ch.yaw,
@@ -9350,6 +9679,16 @@ export async function boot({ loading, bootStart, mapId }) {
        * it goes false. A radio or gamepad moving the sticks in the air is
        * the pilot answering the card without a pointer. */
       const aloft = !landed && !launchStaging && !poseLock && !turtleWait && !turtleFlip.active;
+      if (ui.mode === 'race') {
+        const nowRates = ui.settings.rates;
+        const wasRates = rateCoach.trialFrom
+          && ratesDiff(rateCoach.trialFrom) !== ratesDiff(nowRates)
+          ? rateCoach.trialFrom
+          : null;
+        ui.setRateReadout(nowRates, wasRates);
+      } else {
+        ui.setRateReadout('', '');
+      }
       ui.setAirSlider(true, aloft, {
         airMs: airtimeMs,
         padFlying: aloft && !input.isKeyboardPrimary()
@@ -9363,6 +9702,7 @@ export async function boot({ loading, bootStart, mapId }) {
       updateTargetLock();
     } else if (mode !== 'paused') {
       ui.setStickOverlay({ show: false, roll: 0, pitch: 0, yaw: 0, throttle: 0 });
+      ui.setRateReadout('', '');
       ui.setAirSlider(false);
       ui.syncChipFade(false, nowWall);
       ui.setTargetLock(LOCK_OFF);
@@ -9501,6 +9841,8 @@ export async function boot({ loading, bootStart, mapId }) {
           ? `LAUNCH ${deg}\nPunch throttle`
           : `LAUNCH ${deg}\nCentre the stick, then punch`)
         : 'LAUNCH CONTROL\nPitch forward, then centre the stick');
+    } else if (rateVerdictOpen) {
+      ui.setBanner('');
     } else if (!flownThisRun) {
       /*
        * THE SECOND LINE IS A PROMISE ABOUT WHAT STARTS, and in freestyle it
@@ -9530,6 +9872,11 @@ export async function boot({ loading, bootStart, mapId }) {
       let second = runLaps === PRACTICE_LAPS
         ? '\nPractice: no lap limit. The green gate starts your lap'
         : '\nThe green gate starts your lap';
+      if (rateArmed && (rateCoach.state === 'measuring' || rateCoach.state === 'trial')) {
+        second = `\n${ratePrompt}`;
+      } else if (!rateArmed && ui.mode === 'race') {
+        second = '\nFly the track and once ready click the button to get your rates checked.';
+      }
       if (race.freestyle) {
         /* The counter counts the lines in every position (decision 2), so
          * even Lines only has something to promise now. With Manga and
@@ -9912,7 +10259,10 @@ export async function boot({ loading, bootStart, mapId }) {
     if (Number.isFinite(ms)) {
       sessionFlightTimeMs = ms;
     }
-    return { ms: sessionFlightTimeMs, shown: sessionTimePromptShown, thresholdMs: SESSION_TIME_PROMPT_MS };
+    return {
+      ms: sessionFlightTimeMs, shown: sessionTimePromptShown, due: sessionTimePromptDue,
+      thresholdMs: SESSION_TIME_PROMPT_MS, prompt: supportPrompt ? supportPromptScreen : null,
+    };
   };
   /* P12 and P13 are audio budgets, and neither can be read while the audio
    * context is null: update() returns immediately and reports a cost of
@@ -10533,6 +10883,25 @@ export async function boot({ loading, bootStart, mapId }) {
   /* The recorded CSV itself, so a capture can check the file the download
    * button would write without driving a file dialog. */
   window.__flightLogCsv = () => flightLog.csv();
+  /*
+   * The rate measurement, so a capture can fly a known stick program and
+   * ASSERT what was measured rather than reading it off a screenshot.
+   *
+   * Whether it is armed is in here on purpose: "nothing was measured" and
+   * "nothing was watching" look identical from the outside and have
+   * completely different causes, and the first version of this feature shipped
+   * with a session that measured a flight correctly into a room that could
+   * not draw it.
+   */
+  window.__rateMyRates = () => ({
+    armed: rateArmed,
+    measuring: Boolean(ui.measuring),
+    seconds: rateCoach.session.seconds,
+    moveSeconds: rateCoach.moveSeconds,
+    pass: rateCoach.pass,
+    coachState: rateCoach.state,
+    read: ui.rateProbe ? ui.rateProbe() : null,
+  });
   /* The ghost, so a capture can ASSERT a chase: what is armed, what the
    * recorder holds, where the rig is and how present it is. */
   window.__ghost = () => {
@@ -11107,6 +11476,35 @@ export async function boot({ loading, bootStart, mapId }) {
       },
       keys: [...input.keys].filter((k) => input.isStickKey(k)).sort(),
       sticks: [r2(ch.roll || 0), r2(ch.pitch || 0), r2(ch.yaw || 0), r2(ch.throttle || 0)],
+    };
+  });
+  /*
+   * WHAT THE RATE SESSION HAS MEASURED, AND THE FIT OVER IT.
+   *
+   * Computed on demand rather than kept up to date, because the only thing
+   * that reads it is a screen a pilot has opened, and fitting a session is
+   * arithmetic over a dozen histograms: once when a room opens is free,
+   * sixty times a second while flying is work nobody can see. The
+   * accumulator is the thing that runs every frame, and all it does is add.
+   *
+   * Null when nothing has been measured, so the room can say so rather than
+   * draw a proposal built out of an empty session.
+   */
+  ui.setRateProbe(() => {
+    const report = rateCoach.report();
+    /* The pass in progress, which is what the room's progress readout and
+     * the title row read. The finished passes are in the report. */
+    return {
+      ...report,
+      armed: rateArmed,
+      moveSeconds: rateCoach.moveSeconds,
+      passProgress: rateCoach.passProgress,
+      passLimit: PASS_LIMIT,
+      /* Live, so a pilot mid pass can see where it is heading rather than
+       * only seeing an answer once the pass fills. Computed on demand in a
+       * screen's render, never per frame. */
+      waitForLap: rateCoach.waitForLap,
+      live: rateCoach.moveSeconds > 0 ? rateCoach.peek() : null,
     };
   });
   ui.setLatencyProbe(() => ({

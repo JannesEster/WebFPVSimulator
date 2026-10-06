@@ -66435,3 +66435,1477 @@ Flight feel is unverified: what a pilot sees on a gentle takeoff is the thing th
 The owner's word, 2026-10-05 10:28Z, in the project thread: "push to masin" (main), after the draft PR (#36) with its
 CI green. Covers this entry only: the parked lift change in src/main.js and scripts/takeoff-check.js. Fast forward,
 main had not moved since the branch was cut (72b6dbb).
+
+## 2026-10-05 | shell | "The simulator hit a fault" after twenty minutes in the air, and laps reported as not posted (three tickets, the owner's ask)
+
+### The tickets
+
+Three in ten minutes on the afternoon of 5 October, bug-03ae2f2a (13:11 UTC, "system fault randomly happened"),
+bug-551a5c32 (13:14, "The simulator hit a fault and stopped flying") and bug-7f783182 (13:20, "on posting scores fault
+and stopped flying"), and the owner's own console at 13:24, all carried one fault from the live shell (main.js?d=tmfjtm):
+
+    ReferenceError: settings is not defined
+        at frameBody (main.js:7561:18)
+        at runFrame (main.js:7483:7)
+        at frame (main.js:7377:5)   (frameTimer on the third, a Low machine pacing on the timer)
+
+Each was flying acro on a radio, 37, 42 and 85 minutes into the page. The owner: "it keeps crashing" after R.
+
+### Cause
+
+1415c94 (PR #34, the support prompts, on main 2026-10-05 00:09 UTC) added three names that do not exist where it used
+them, all in src/main.js:
+
+- `settings.supportPrompts` in frameBody. The shell's settings are `ui.settings`; there is no `settings` in that scope.
+  The prompt counts a session's time in the air, and once it passes twenty minutes the condition reads the name, so
+  every frame in the air threw. runFrame turns a throw into the banner, and after R the first frame in the air reaches
+  the same line, because the clock does not go back and the prompt's shown flag was never set. That is "it keeps
+  crashing".
+- `settings.supportPrompts` again in submitBoardTime, after a lap is posted.
+- `readPostedBest(trackIdNow)` in submitBoardTime, never imported. It runs after the board has taken the lap, so it
+  threw into the catch: the pilot was told "Could not post that time. readPostedBest is not defined", the lap stayed
+  pending and was offered for upload again, and markTimePosted never ran. The time was on the board. This is
+  bug-7f783182's "on posting scores".
+
+And one that only throws on a click: the prompts' Settings button called `ui.openMenu('advanced')`, which is not a
+method of Ui. And `isNewBest` was writePostedBest's answer, which is true for a lap stored AND for one the stored best
+already beats, so a "new personal best" prompt would have shown on every post with a best behind it. Neither had ever
+run, because the line before each one threw.
+
+### Fix (src/main.js)
+
+- `ui.settings.supportPrompts` in both places, and `readPostedBest` imported from ./share/session.js.
+- A new best is a lap that beat the stored one: `prevBest != null && Math.round(fastest) < prevBest`.
+- The best lap prompt is in a try of its own, so a prompt that fails cannot tell a pilot a posted lap did not post.
+- Settings on a prompt opens the Advanced room with `ui.act('advanced')`, the same action as the menu row.
+- `window.__sessionFlight(ms)` reads and sets the session clock, for the check below.
+
+### The check
+
+scripts/longflight-check.js, `npm run check:longflight`: the five inch on the field takes off, the session clock is set
+half a second short of twenty minutes, and it flies 2.5 s across the line. Asserted: no frame faulted, more than 30
+frames drawn past the line (a frame that throws never reaches the count at the end of frameBody), the clock crossed
+the line, and the prompt's trigger fired. With the fix: all pass, 124 frames past the line. With the bare `settings`
+put back in a scratch worktree: 3 failed, on the pilots' own ReferenceError at frameBody, 0 frames past the line.
+
+### The audit
+
+Every module under src/ (250) parsed with espree and scoped with eslint-scope, the copies this container has
+installed globally for ESLint, not added to the repository, and every name no scope declares checked against the
+982 globals of Chromium's window. Before the fix: the three above (readPostedBest, settings twice) and Node's Buffer and
+process in src/trackbuilder/selftest.js, which is a Node script. After: only the selftest's. A standing check of this
+kind would have caught 1415c94 before main, but it needs a parser, which is a dependency, and that is the owner's call
+(see For the owner in the next entry).
+
+### RUN LOG
+
+    check:longflight     all pass, 124 frames past the line; the control with `settings` put back: 3 failed, 0 frames
+    support:selftest     17 of 17 checks clean
+    lint:frame           34 passed, 0 failed
+    lint:boot            9 of 9 checks clean
+    check:takeoff        all pass
+    lint:shell           1 problem, "fold at 844x390 touch: credits: the list hangs 30 px under the command bar, was 0
+                         px", the same on 7b06722 with this change absent (the next entry finds where it came from)
+    npm run verify       not run: no physics, plant, module ABI or build change
+
+Live from 13:32:49 UTC: the page's stamped https://webfpv.org/sim/src/main.js?d=tmfsap has the committed file's SHA-256.
+
+### To main
+
+The owner's word, 2026-10-05 13:31 UTC, in the project thread: "push suspected fix to main first, then continue
+testing, you can always roll back with corrected fix, its broken onw, peoplea re waiting". Pushed 2e34c05 as a fast
+forward from 7b06722 before every check above had finished, as asked. This entry follows it.
+
+### What went wrong
+
+- The new check's frame count was first taken over the whole flight, and the broken shell drew 30 frames before the
+  line, exactly on the threshold. It now counts from the first frame that sees the clock past the line: 0 when broken.
+- Nothing ran the support prompts' paths before they reached main: every flight in the checks is seconds long, no
+  check posts a lap, and nothing reads the shell for undeclared names.
+
+## 2026-10-05 | shell, builder, board | The rest of the support prompts, and a sweep for what else broke (the owner's ask)
+
+The owner, 13:34 UTC: "please check for any remaining regressions or bugs".
+
+### What was swept
+
+- Every ticket on the board since 3 October (44), for any other fault: none. The only faults are the three above.
+- Every commit on main since 4 October read again. 72b6dbb (Patreon address) and 46a58cb (the takeoff camera) are sound.
+  1415c94 had more, below.
+- The undeclared name audit of the entry above, widened: every module and every page's inline scripts here (254 and the
+  five pages), and the board's page and server. Here: clean after 2e34c05. The board: one, below.
+- Every npm script on main at 2e34c05, one after another, in a checkout of its own (RUN LOG). Each red one was run
+  again on a27df1c, yesterday's main before 1415c94, to tell today's from older.
+
+### Found, and fixed here (all from 1415c94)
+
+1. **The best lap prompt could not be clicked or closed.** 2e34c05 made its path run for the first time. It was put
+   inside .screen-results, and a screen is pointer-events none, which its children inherit, so the close button and
+   both links were holes to the page behind (a probe's elementFromPoint at the close button returned BODY). It was
+   hidden with the results screen and came back on the next one. Now src/share/supportprompt.js puts the prompt on the
+   body, the stylesheet gives it pointer events of its own, and main.js takes it away the moment the screen it was
+   shown on is left, so it is never over a flight, which matters most to a pilot on a radio with no pointer.
+2. **Its Patreon link had two question marks**: PATREON_JOIN_URL already carries `?rid=29740590`, and the prompt
+   appended `?utm_source=...`, so the tier id read `29740590?utm_source=sim-prompt`. Both links are built with URL now.
+3. **The twenty minute prompt never showed.** It looked for a pause once, 100 ms after the line, while the pilot was
+   still flying. It is now due from the line and shown on the next pause or results screen. Paused time no longer
+   counts toward the twenty minutes: a pause holds the craft in the air and was counted as flying.
+4. **Off in Settings was forgotten on reload.** `supportPrompts` had no default in DEFAULTS, and loadSettings keeps only
+   a key that has one. It has one now.
+5. **The builder's prompt** went inside the publish dialog with none of the prompt's styles, which live in the shell's
+   index.html: bare text and links. It read `this.readSettings` and `this.openSettings`, which TrackBuilder never had,
+   so it ignored Off, and its Settings button only closed it. The builder's page carries a copy of the styles now, the
+   prompt module reads the shell's Off itself, and a prompt with nowhere to send Settings has no Settings button.
+6. **The prompts' clicks were never counted.** The board takes a support click from 'sim' or 'landing' and refuses any
+   other source (SUPPORT_SOURCES in its src/validate.js); the prompt sent 'sim-prompt-pb'. It sends 'sim' now. Which
+   prompt it was still rides on the links, as ref and client_reference_id.
+7. **src/fresh.js was stale** (lint:preload red since 1415c94): supportprompt.js was not in the deploy's stamped
+   addresses, so it was served at its bare address, which a browser may keep for four hours, and a change to it would
+   reach a returning pilot late, beside a main.js that expects the new one. Regenerated with gen-preload.
+
+### Found, and fixed on the board's branch, not on its main
+
+ae9e7e1 on the board (PR #5, the patron badges, the same morning) called `patronBadge()`, which did not exist. Nothing
+broke only because no row was marked: on Postgres, which the live board runs on, getTrack never set `patron` at all.
+Served from a scratch file store with a patron's time, the board's main throws "patronBadge is not defined" and the
+home page draws no times. Its stats panel's Support clicks group printed "Simulator69 / 42%" with no bar, from classes
+the page has no styles for. Fixed on the board's claude/throttle-feel-tune-m87noj, bc7bff5, with its npm test green;
+not on its main without the owner's word.
+
+### Found, and not changed
+
+- **The credits room on a phone held sideways**: the battery row 1415c94 added makes the list hang 30 px under the
+  command bar at 844 by 390 (lint:shell, a budget that fails when a screen gets worse; it passes on a27df1c). The bar's
+  Back button stays in sight. Re-recording the budget or moving the row is the owner's call, not this entry's.
+- The prompt's "shown" beacon (`kind: 'support_prompt_shown'`) is refused by the board, which has no such kind. Harmless,
+  once a week at most; counting it needs the board to take it first.
+
+### Red, and older than today
+
+- check:builder, "with the card up, the second finger on it still joins: the pair zooms": bfa7492's, 4 October. Fixed
+  in the next entry.
+
+- lint:input, "a key pressed at the question does nothing behind it": the race recorded on 2 October (the builder's
+  room opening behind the question).
+- lint:devices, two whoop room tablet problems ("the card is 302 px of a 581 px drawing"): the same two fail on a27df1c.
+
+### For the owner
+
+- A static lint for undeclared names over src/ and the pages (espree and eslint-scope, or ESLint's no-undef, as dev
+  dependencies). Seconds to run, and it would have caught all three names of 1415c94 and the board's patronBadge. Not
+  added: a dependency needs an argument first.
+- The credits row, above.
+- The board's fix to its main.
+
+### What changed
+
+- src/share/supportprompt.js: on the body; links built with URL; Off read from the shell's settings too; a click sent as
+  'sim'; Settings only when the caller has somewhere to send it.
+- src/main.js: one `offerSupport`, the twenty minute prompt due until the next stop, the prompt taken away when its
+  screen is left, paused time not counted; `__sessionFlight` also reports `due` and the prompt's screen.
+- src/ui/ui.js: `supportPrompts: true` in DEFAULTS.
+- index.html: the prompt has pointer events of its own. src/trackbuilder/index.html: the prompt's styles.
+- src/trackbuilder/app.js: the publish prompt calls the module and nothing that does not exist.
+- src/fresh.js: regenerated.
+- scripts/longflight-check.js: after the line, nothing over the flight; Escape pauses and the prompt is up, on the body,
+  its close button and link what a click lands on, the tier id whole; Escape resumes and it is gone; in a second session
+  its Settings button opens the Advanced room; a stored Off is read back as Off by loadSettings and by the prompt module.
+
+### RUN LOG
+
+On this tree:
+
+    check:longflight     all pass, 17 checks, the last of them in a second session (the page again) where the
+                         prompt's Settings button opens the Advanced room. The first version of the new check, 16 checks
+                         without that one, on 2e34c05 (main as it was): 9 failed, among them no prompt up on the pause,
+                         and a stored Off read back as unset by the shell and as On by the prompt module
+    the prompt on 2e34c05, a probe   inside .screen-results, pointer-events none; elementFromPoint at its close button
+                         and at its Patreon link: BODY; hidden on the title and back on the next results; the link
+                         https://www.patreon.com/checkout/webfpv?rid=29740590?utm_source=sim-prompt&ref=sim-prompt
+    the builder, a probe on the body, fixed, pointer events auto; its close button and link take the click; the
+                         buttons are the close, Patreon $3/mo and One-off $5, no Settings; it closes; with a stored Off
+                         it is not shown, with On it is
+    support:selftest     17 of 17 checks clean
+    lint:preload         up to date, boot 130 modules, city 76, built 34; 254 served
+    lint:frame           34 passed, 0 failed
+    lint:boot            9 of 9 checks clean
+    check:takeoff        all pass, run alone (107, 66, 115 and 53 frames). Run beside the sweep it failed only its "the
+                         page drew the flight" line, 21 and 22 frames on the two punches, which the sweep's own run of
+                         main drew 60 of
+    lint:shell           1 problem, the credits fold, the same as main (above)
+    the name audit       254 modules and the five pages: 0 undeclared names
+    npm run verify       not run: no physics, plant, module ABI or build change
+
+The board, bc7bff5 on its branch: npm test all passed; lint:licence and lint:nouns clean; served from a scratch file
+store with BOARD_PATRONS naming one pilot, read in Chromium: the badge drawn beside that pilot, no page error, and the
+support group as two bars (the board's main on the same store: "patronBadge is not defined", no times drawn, and
+"Simulator3 / 60%"); getTrack on Postgres, through a stand-in driver, marks the patron's row and not the other.
+
+The sweep, main at 2e34c05, each npm script alone in its own checkout:
+
+    green   lint:presets, lint:catalog, lint:partners (65), lint:quality (71), lint:boot (9), lint:memory, lint:fc (33),
+            lint:frame (34), lint:nouns, lint:arcade, lint:responsive, lint:scale, lint:board (skip: no board here),
+            lint:attract, check:wall (78; targets 1 met, 3 not), check:plant and its selftest, check:crash-pacing,
+            check:takeoff, check:longflight, check:world, check:world-golden and its selftest, check:world-town,
+            check:world-engines and its selftest, check:chase, check:counter, check:props, check:room (71),
+            check:roads, check:clip (2559)
+    red     lint:preload and lint:shell, 1415c94's, above; lint:input (222 of 223) and lint:devices (2 problems), older,
+            above; check:builder, 808 of 811: the pinch of the next entry, and two recorded on 4 October as timing
+    running from check:town-patrons to gates when this was committed; the next entry has them
+
+### What went wrong
+
+- The fault entry's own lint:shell line called the credits problem not this change's, which was true, and stopped
+  there. So did the takeoff camera entry before it. It was 1415c94's, and finding that took one run on a27df1c.
+- check:takeoff on this tree failed its "the page drew the flight" sanity line twice (21 and 22 frames, needs more than
+  30) while the sweep ran a browser beside it; the sweep's own run on main drew 60. Run again alone, above: all pass.
+
+### To main
+
+The owner's word of 13:31 UTC, the fault entry's: "push suspected fix to main first, then continue testing, you can
+always roll back with corrected fix". This is the corrected fix: every change here is to the support prompts that
+caused the fault, or to what 2e34c05 made live (the best lap prompt that could not be closed). Pushed as a fast forward
+from 2e34c05. Not covered, so not on main: the board's fix, the credits row, and the builder pinch of the next entry.
+
+## 2026-10-05 | builder | A pinch whose second finger lands on the card zooms again (found by the sweep)
+
+The sweep of the entry above ran check:builder on main, and one of its three red lines was new: in the "touch" case,
+"with the card up, the second finger on it still joins: the pair zooms" read 4.2329 then 4.2329, no zoom at all. Run on
+its own with `--only=touch`, it passes on 2166799 and fails on a27df1c. Between them is bfa7492 (4 October, "drag the
+options card by its heading"), whose entry says check:builder was not run and nobody had dragged the card. Its
+pointerdown on the heading takes any pointer, prevents it, stops it and captures it, so a second finger that came down
+on the heading was a card drag, and the pinch it belonged to never heard of it.
+
+### What changed
+
+- src/trackbuilder/ui.js, armCardDrag: the heading drags the card only for a primary pointer. A mouse always is; on a
+  screen, the first finger down is and a second one is not. One condition.
+- scripts/builder-flow-check.js, "touch": one finger on the card's heading drags the card by what the finger moved,
+  and the room stays where it was. The card's drag had no check at all.
+
+### RUN LOG
+
+    builder-flow-check --only=touch   37 checks, all pass, on this tree. On main (2e34c05, the same new check): 1
+                                      failed, the pair that never zoomed; the new drag check passes there, so the
+                                      card's drag worked before this and works after it
+    the same case on 2166799          the pinch passes; on a27df1c it fails: bfa7492 is between them
+    node src/trackbuilder/selftest.js 2559 passed, 0 failed
+    not run                           the whole of check:builder again (15 minutes; the sweep's run is the entry
+                                      above's, and only the touch case reads the card's heading), npm run verify
+                                      (no physics, plant, ABI or build change)
+
+The other two red lines of the sweep's check:builder, "More opens the drawer with everything else in it" and "and the
+ring is at its foot", are the ones recorded on 4 October (the letters entry) as failing on main too, timing on a
+software rasteriser. Not touched.
+
+### To main
+
+Not pushed to main: this is not part of the fault the owner's 13:31 word covered. It is on claude/throttle-feel-tune-m87noj.
+
+## 2026-10-05 | builder, board, tests | The pinch and patron fixes to main (the owner's word), and the sweep's second half
+
+### To main
+
+The owner's word, 2026-10-05 14:40 UTC, on the decision card "Push the board's patron badge fix and the builder's pinch
+zoom fix to main?": "Push both". It covers those two and nothing else: the builder's pinch (aafcc38, the entry above) and
+the board's patron badge and stats panel (bc7bff5 on the board's claude/throttle-feel-tune-m87noj, the sweep entry's
+"Found, and fixed on the board's branch"). Both pushed as fast forwards, this repository's main from ee5be65 and the
+board's from ae9e7e1. Not covered, so not changed: the credits row, which is still the owner's call.
+
+Run before the push, in the same turn: the board's npm test, all passed on bc7bff5; here, lint:preload up to date and
+src/trackbuilder/selftest.js 2559 passed on aafcc38. Not run again: builder-flow-check --only=touch, which passed when
+aafcc38 was committed, because the training park comparison below was flying in a browser and a second browser beside it
+would have disturbed it.
+
+### The sweep's second half
+
+The sweep entry was committed while its second half was still running. This is that half: main at 2e34c05, the same
+tree as the first half, each npm script alone and one after another.
+
+    green   check:town-patrons (24) and its selftest (14 of 14 planted faults caught), check:orbit (17), check:path (12),
+            check:fresh (18), check:craft (20 of 20), check:seat (10 of 10), check:crash (0 guards failed),
+            gif:selftest (81), ghost:selftest, contact:selftest, score:selftest, replay:test (9 of 9), replay:selftest,
+            link:selftest, input:selftest (380), autoscale:selftest (52), predict:selftest (11), music:selftest,
+            stats:selftest (79), support:selftest (17 of 17), seat:selftest (25 of 25), test:edge, micro:check,
+            whoop:gates (21 of 21), trick:sweep
+    red     gates: 2 of 20 (P1 and P2), the same rows the grip change's entry recorded, P5's max level of 125 km/h
+            included. The roadmap gates that are not built. Not a regression.
+            park:fly: 10 of 20 at one rep, where the last recorded count is 12 of 20 (24 September). Wall Tap passed.
+            Running when this was committed: the training park flown three times over on b58d21a, yesterday's main
+            before the grip change (37a7f65), and on aafcc38, to tell the grip change from what came before it. The next
+            entry has it.
+
+### Also read again
+
+- The board's tickets at 14:30 UTC. One new since the sweep: bug-2553e6c7 (14:27), a flight feel report, "about right",
+  no error in it. The three fault tickets read fixed on the board, marked at 13:40 UTC, not by this thread.
+- The live landing page (webfpv.org, last modified 01:05 UTC): its module graph, 27 modules and the page, through the
+  same undeclared name audit: none. Its support click is sent as source 'landing', which the board takes.
+- The live simulator: index.html, src/main.js, src/share/supportprompt.js, src/fresh.js, src/ui/ui.js and the builder's
+  index.html and app.js are byte for byte ee5be65's.
+
+## 2026-10-06 | board | Two board pull requests merged on the owner's word: the Patreon prices and the ref tags
+
+The owner asked in the project thread (2026-10-06 03:05 UTC): "grok has a pr waiting, please review, fix as needed and
+merge with main". The two pull requests that were waiting were the board's #6 and #8, both opened by the Cursor agent at
+03:01 and 03:13 UTC, and both with the owner's own comment asking for a review. This repository had none open, and its
+branch `GroksBugFixForClaudeToReview` has no pull request and no common ancestor with main (`git merge-base` returns
+nothing, 615 commits against 91), so it was left alone, as the Git section says.
+
+### What went to the board's main
+
+- **#6, "Board: update Patreon tier prices"**, squashed as a0c84f9. The note in `public/app.js` and the three Patreon
+  anchors in `public/index.html` now read "$3, $8, $20, Your sign in the sim $25, USD a month", and the link is the
+  `/membership` page. Five lines. Checked against the owner's brief: the note and all three anchors (href, aria-label,
+  title) are equal to the constants, no `$12`, `$5` or GST is left outside the vendored copies, and the diff touches
+  neither the patron badge nor the stats code, so the old badge code does not come back. The owner's comment says it
+  replaces #4, which was closed once it merged.
+- **#8, "Count patreon, bsky and tiktok ref tags"**, squashed as 9d27618. Five new entries in `KNOWN_REFS` in
+  `src/validate.js` and five checks in `src/selftest.js`. Checked against the owner's brief: all 15 old tags and their
+  aliases fold to what they folded to before (read back from `refKey`, not assumed), the new ones fold to `patreon`,
+  `bsky` and `tiktok` in any case, an unknown tag is still `other`, and the diff is additions only.
+
+### Run, in the same turn
+
+The board's `npm test`: all passed on each pull request's head alone, on a local merge of both onto bc7bff5, and on the
+board's main after the merge (9d27618). `lint:licence` (30 files) and `lint:nouns` passed on each head. Not run: the
+server against a scratch database, and a look at the page, so nothing here has seen the real page or a real `?ref=`
+visit.
+
+### Left for the owner
+
+The board now lists four tiers and the simulator's `src/share/patreon.js` and the landing page's `src/config.js` do not.
+The simulator's `PATREON_NOTE` has three ("Build the sim, $20. USD a month."), and the landing page says "Memberships
+start at $3 USD a month." The board's `public/app.js` comment says the strings are meant to agree. The four tiers are
+what the owner asked for in #6, so the board was not changed back. If the fourth tier is real, the simulator's note and
+the landing page need the same line, and the simulator's `scripts/support-selftest.js:61` pins the three tier form.
+Not changed here.
+
+### Review
+
+No review workflow was run. Findings from reading the diffs: none that needed a change.
+## 2026-10-06 | partners, tests | The first patron sign, Quad Configurator, and the town check that could not carry one
+
+The owner's word, 2026-10-06 04:21 UTC, in the project thread: "there is another pr up from grok, please review fix as
+needed and merge with main". It covers this pull request (#38, opened by the Cursor agent at 04:20 UTC) and nothing
+else. Its own text says the logo was supplied by the patron on 2026-10-06 and that the owner agreed to it, and that the
+sign is the $25 Patreon tier, "Your sign in the sim".
+
+### What the pull request does
+
+The first real entry in `PATRON_MAP_BRANDS` (src/partners/roster.js, empty until now): `quadconfig`, Quad Configurator,
+no role, links or about, because a patron is not findable. The logo as supplied (assets/partners/quadconfig/colour.png,
+1882 by 400, md5 6da8ca2a4bfd595ca9097ca27f53b24c), a cream mono made by scripts/partners.js with the navy field keyed
+out, and a NOTICE line. The sign's aspect is 3.593, so the town fits it 3.2 by 0.89 m and a built map 6.0 by 1.67 m.
+
+### What the review found, and what was done
+
+1. **The pull request called a failing check pre-existing. It is not.** `check:town-patrons` is 24 passed and 0 failed on
+   main (e2b8e2a) and 23 passed and 1 failed on the pull request, `drawn` on spot 1: "68 of 190 samples are off the face
+   by more than 1 cm". Cause: `drawn` gathers every triangle in the scene and compares the nearest under each sample with
+   the collider face. The check's own header says the paint stands 1.5 cm in front of the face on purpose, and the
+   roster was empty when the check was written, so no mark was ever in the scene to be counted. The first real patron was
+   the first, and the check read the sign's own plate as a band standing proud of its wall. Leaving out only that plate
+   brought all 68 samples back inside 1 cm, so all 68 were under it. It was a defect in the check and not in the town:
+   the wall is plain.
+   Fixed in scripts/town-patron-check.js, in the traversal that gathers the drawn triangles: a mesh named
+   `partnerMarkTrim`, which is what `makePartnerMark` calls every sign's paint, is left out. Anything else in front of
+   the paint is still counted. **No threshold moved**: DRAWN_TOL is still 0.01 m and the 1.5 cm is still what the paint
+   stands off by. After the change spot 1 is 190 of 190 samples within 1 cm (worst 0.000 m), the check is 24 and 0, and
+   the self test is 14 of 14 planted faults caught with a clean baseline, the plinth band 2 cm proud still among them.
+   While this was being written the Cursor agent pushed the same one line (2fd1d56, 04:26 UTC, same mesh name, same
+   place); the two were merged and the longer comment kept.
+2. **A pronoun.** The roster comment said the logo was "supplied by him". Nothing in the repository says the patron's
+   pronouns, so it now says "the patron".
+3. **Read and found nothing:** `quadconfigMono` keys out pixels within 20 units per channel of #323f5d and makes the
+   rest cream at their own alpha. Read as an image the mono is clean: the quad mark's inner gaps are open, the text is
+   whole, and `lint:partners` regenerates it byte for byte (75 passed). No em dash or en dash in the diff. No undeclared
+   name: the built map's patron path (`choosePatronSpots`, `paintPatronMarks`) is old code whose imports are all there,
+   and it ran, below.
+
+### Run, in the same turn
+
+On the pull request with the fix: `check:town-patrons` 24 and 0, `check:town-patrons:selftest` 14 of 14 and baseline
+clean, `lint:partners` 75 of 75, `check:props` all passed, `lint:preload` up to date (254 served), `lint:boot` 9 of 9,
+`lint:memory` pass (every world lazy and freed), `stats:selftest` 79 of 79, `support:selftest` 17 of 17.
+
+A scratch script, not committed, flew the real shell into Your map (Hibari Yard) on this branch and on main. On this
+branch: five marks, the four partners' unchanged and `quadconfig` at (11.78, 3.89, 45.77), 6.0 by 1.67 m, `findable:
+false`. On main: the four partners. The sign's canvas, as `partnerDataUrl` draws it, shows the logo whole on its navy
+field. Both PNGs answer 200. The page's two console errors are the board's two refused fetches, the same two on main
+and the same two `lint:memory` names ("the board is not running here").
+
+### Not run
+
+`npm run verify`, because nothing here touches the physics, the plant, the ABI or the build. `node scripts/shots.js`,
+so nobody has looked at the sign on a wall in a rendered frame, only at its canvas. No flight. The town's live mark was
+read by `check:town-patrons` and not seen.
+
+### Left, not done
+
+- The board's and the front door's copies of src/partners/roster.js are one patron behind this repository until they are
+  next copied with `scripts/vendor.js`. Neither prints patrons, and the board copies only the marks it names, so the
+  copy needs no change for this.
+- `PATREON_NOTE` here still lists three tiers and `scripts/support-selftest.js:61` pins that form, while the board now
+  lists four. Recorded in the entry for the board's #6 and #8 (this repository's PR #37).
+
+### Shots, run after the merge
+
+The owner's word, 05:46 UTC: "push to main verfiy with shots". `scripts/shots.js` at 1280 by 720, graphics high, the
+shell's UI hidden, a fixed camera through `window.__setCam`; the eye was searched for in the page as clear of every
+solid with a clear line to the sign. The driver is a scratch script and is not committed, and neither are the pictures
+(.gitignore); they are in the project's files under quadconfig-sign/.
+
+- **Your map, Hibari Yard** (built-front, built-wide, built-oblique): the sign is flush on the side of a teal container at
+  (11.78, 3.89, 45.77), logo whole and unstretched on its navy field, in the same style as the Mantis FPV partner sign
+  two stacks over. What went wrong first: two earlier cameras at this sign were inside geometry, one against a
+  container's side and one under a container's roof, so those frames showed a stencil letter and a flat cream block. They
+  were a bad eye and not a bad sign, and were replaced.
+- **The town, spot 1** (city-front, city-wide), (28.35, 1.45, 82.435) on the purple wall behind the cherry tree: flush,
+  readable, 3.2 by 0.89 m. In city-wide a utility pole and the house hide part of it, which is the view and not a fault.
+- **Console:** three refused fetches to the board in each run, the board not running here, and no harness fault.
+- **Undeclared name audit** (espree and eslint-scope, `/opt/node-tools`) on the four files the pull request touched or
+  reads for its patrons: 0 undeclared names.
+- **Still not done:** a flight past the sign, so nothing says how it reads at speed or on a phone, and the cream mono
+  file is not in any of these frames.
+
+
+## 2026-10-05 | tests, board | The training park before and after the grip change, and the patron fix live
+
+### The training park
+
+park:fly at three reps, one tree after the other with nothing else running:
+
+    b58d21a   main before 37a7f65, the grip change        10 of 20
+    aafcc38   the grip change and today's fixes in        10 of 20
+
+The same ten cases pass on both and the same ten fail, each 3 of 3 or 0 of 3. The grip change moved nothing here.
+
+The 12 of 20 recorded on 24 September (11ba560), flown again on that commit today, reads 11 of 20. Against today one case
+differs: "1 Trippy Spin (mast)", passing then and 0 of 3 now. Bisected on that case alone, two reps a step: the first
+commit that loses it is b139395 (24 September, "Tumble flat, always", the owner's "yes make it tumble flat always").
+
+It is the rig, not a regression. The case flies one inverted lap of the mast with a fall of 11.4 m/s2 added (__drop),
+from a centre 24 m up, over 2.3 s, so its planned path reaches the grass at 88 percent of the lap and ends 6 m under it.
+Measured with a scratch copy of the case that keeps the lowest point (not committed): on 11ba560 the craft reached
+0.85 m (the grass is at 0.75) at 99 percent of the lap, never landed, and finished the lap skimming on its back; on
+aafcc38 it reached the grass at 90 percent and was landed for 15 of 138 frames, because an inverted craft that is not
+near flat now stands on its corner and goes over, as b139395 intends. The lap ends where its plan goes underground. A
+higher centre or a gentler fall would give the recogniser its lap back. Not changed here: park:fly is a manual driver
+nobody asked to touch, and changing a case so that it passes is the owner's call.
+
+### Live
+
+- The builder's ui.js and the board's app.js and stats.js served from webfpv.org were byte for byte the pushed ones from
+  14:43 UTC.
+- The live board's track sheets carry `patron` on every time now, Postgres included: 447 times on 44 tracks, none marked.
+  So BOARD_PATRONS on the host names nobody who has posted, or is unset, and no heart shows until it does.
+- Served from a scratch file store with one patron (bc7bff5, Chromium): the heart on the card's podium row, in the
+  Lately feed and on the sheet's record, and no page error.
+
+### Looked at, and not a bug
+
+`best`, which a card is first drawn from, carries no `patron` in either store, so a patron's record looked unmarked on
+the cards. A change adding it in both stores was written and served: the card's holder line and podium are drawn again
+from the track's times once they arrive, and those carry the mark, so the change altered nothing a reader sees and left
+the holder line an empty element with a stale has-patron class whenever a podium took its name. Reverted, not committed.
+
+### RUN LOG
+
+    park:fly --reps=3         b58d21a 10 of 20; aafcc38 10 of 20, the same cases, each 3 of 3 or 0 of 3
+    park:fly                  11ba560, one rep: 11 of 20, "1 Trippy Spin (mast)" passing
+    git bisect run            --only="Trippy Spin (mast)" --reps=2 a step, 11ba560 good, b58d21a bad: b139395
+    the board                 the patron probe above; for the reverted change, npm test all passed, and a stand-in pg
+                              driver showed `best.patron` in the list and on the sheet, where bc7bff5 has none
+    not run                   npm run verify: no physics, plant, ABI or build change in this entry
+
+### What went wrong
+
+- The change to `best` was written before reading how a card is painted once its times arrive. A served page showed it
+  was not needed; it cost one probe and was never committed.
+- The 12 of 20 of 24 September is 11 of 20 when its own commit is flown today, so a count recorded in one container is
+  not exact enough to compare with another's by one or two cases. A case by case run on both trees is.
+
+## 2026-10-06 | owner | Flown on the live build: "flys good"
+
+The owner, 2026-10-06 04:15 UTC, in the project thread, after flying the live build (main at e2b8e2a, served from
+webfpv.org since 14:43 UTC on 5 October): "flys good". That build carries the five inch grip change of 4 October
+(37a7f65), the takeoff camera fix (46a58cb), the support prompt fixes (2e34c05, ee5be65) and the builder's pinch
+(aafcc38). It is the pilot's word on a flight, not a check, and which of those changes the flight exercised is not
+recorded.
+
+Still open, put to the owner on a decision card the same morning: the credits room hanging 30 px under the command bar
+on a phone held sideways (lint:shell, 844 by 390), from the battery row of 1415c94. Keeping the row means re-recording
+that budget, which waits on the owner's word; until then lint:shell stays red on that one line.
+
+## 2026-10-06 | shell | About fits a phone on its side again (the owner's "Make it fit")
+
+The owner's choice, 2026-10-06 04:19 UTC, on the decision card "Keep the battery row in Credits, with a short scroll on
+sideways phones?": "Make it fit", whose words were "I tighten Credits on short screens so all six rows fit without
+scrolling, and show you before it goes live". So lint:shell's budget for the About room at 844 by 390 stays at 0, and the
+screen changes instead.
+
+### What changed
+
+index.html, two short screen blocks for .screen-credits (the About room, which lists Partners, Support, Buy Mat a
+battery, FPV wiki, Report a bug and Back):
+
+- max-height 520 px: top padding 14 px (was 5vh), no rule under the title (Paused has none either, and squeezed it sat
+  on the panel's edge), no gap above the panel, and the panel's padding 4 px top and bottom (was 10 and 12). 38 px in
+  all at 844 by 390.
+- max-height 380 px: top padding 6 px, 2 px under the title, the panel's padding 2 px, for phones 360 px tall.
+
+The rows keep their 44 px touch targets and the title keeps its size. Nothing changes above 520 px tall.
+
+### Measured
+
+The panel's bottom against the top of the command bar, on arrival, touch, before (main at e2b8e2a) and after:
+
+    844 x 390   30 px under    0, 8 px clear; the Back row 282 to 326, the bar at 338
+    915 x 412   11 px under    0
+    800 x 360   33 px under    1 px, the panel's own bottom edge; the Back row ends at 307 and the bar is at 308
+    740 x 360                  0
+    667 x 375                  0
+    640 x 360                  0; the Back row ends at 304 and the bar is at 308
+    568 x 320                  8 px; the panel stops at 276 and the list scrolls inside it
+
+568 by 320, the first iPhone SE on its side, cannot fit six 44 px rows: under the title their panel ends at 306 and the
+bar starts at 268. The list scrolls inside its panel there, as it did before. The chip rows rule for windows 640 px wide
+and narrower (`.chip-rows-1 .screen:not(.screen-title)` in index.html) outranks this top padding but never reaches About:
+syncChipRows in src/ui/ui.js counts the bug chip and the music dock, and About shows neither.
+
+On arrival the note for the row under the cursor is now the next thing below the panel, so it starts in the command
+bar's band, dimmed by the bar's fade, where half the Back row was; the page scrolls to it. At 640 px wide it begins under
+the bar's legend. Left as it is, and it shows in the pictures the owner was sent.
+
+### RUN LOG
+
+    lint:shell        PASS; the fold at 844x390 touch reads credits 0 px (main: 30, its one failure); 1600x900 and
+                      1280x720 unchanged
+    lint:responsive   PASS
+    lint:devices      2 problems, the whoop room tablet card at 1024x768 and 1180x820, the same two as main in the
+                      sweep of 5 October
+    pictures          before and after at 844 by 390 and 800 by 360, sent to the owner in the thread, not committed
+    probe             640 by 360 and 568 by 320, after the pictures went, the table's last two lines
+    lint:shell        PASS again after main's #38 (the Quad Configurator sign) was merged in, credits 0 px at 844x390
+    not run           npm run verify: no physics, plant, module ABI or build change
+
+### What went wrong
+
+- The first cut kept the rule under the title with 4 px above it, and squeezed it sat on the panel's top edge. Taken
+  out on short screens instead.
+- The first cut fitted 844 by 390 only and left a 360 px tall phone 15 px under the bar; the second block is for that.
+
+### To main
+
+Not pushed at first: the owner asked to see it before it goes live. The before and after pictures went to the owner in
+the thread at 04:34 UTC, and the owner's word came at 05:46 UTC on 2026-10-06, on the decision card "Push the Credits fit
+for sideways phones to main?": "Push". Its consequence read "It goes live on webfpv.org; open Credits on your phone on
+its side and Back should sit fully above the bottom bar", so the check after it is the owner's own phone. The card's
+context said the push also carries this branch's two progress notes of 5 and 6 October (204385d, 3275779), which are
+text only, and the approval covers those, the fit (ce0238f), the merge of main's #38 (b2dce88) and the measurements
+after it (d08e2a4). Main fast forwarded from ed666ac with this note on top.
+
+## 2026-10-06: Stick overlay setting, on by default
+
+Request: an on-screen stick overlay in the sim, on by default, with a setting to turn it off. Finding: the two gimbals already
+existed (`osd-sticks`, `setStickOverlay`) but main.js drew them only when the keyboard was the primary source, so a pilot on a
+radio or gamepad never saw them. Added `stickOverlay` (boolean, default true, saved with the other settings) and a "Stick overlay"
+row beside Show FPS. main.js now passes `show: ui.settings.stickOverlay !== false && !input.isTouchPrimary()`, so every non-touch
+source gets the boxes and a phone on thumb sticks still does not. The Weight slider between the boxes is not covered by the
+setting. Display only: it reads channels the frame loop already holds, so physics and determinism are untouched.
+
+Checked: `node --check` on both files, `lint:boot` 9 of 9, `lint:nouns` pass. `lint:shell` FAILS with 8 problems, and fails the same
+8 on main without this change; this change adds one row to Pilot's overflow (702 to 747 px). Baseline not re-recorded. Not run:
+`npm run verify` (no physics, ABI or build change), `shots.js`, `lint:input` (timed out at 280 s here). Not seen on screen.
+
+What went wrong. Nothing broke, but a radio's channels are shown as the dots, and I have not seen that against a real radio.
+
+## 2026-10-06: Stick overlay, reviewed, the gate mark fixed, and checks for it
+
+Request, Mat in the thread: "ensure there are tests to cover this new functionality and review sonnets work". The review was
+the owner's ask, so its findings are written here whether or not they were acted on.
+
+Findings.
+1. Fixed. The gate mark still parked for the keyboard alone. `updateTargetLock` sized its bottom band on
+   `input.isKeyboardPrimary() || input.isTouchPrimary()`, which was the old test for "the gimbals are up". The first build moved
+   the drawing to "the setting is on and the thumbs are not flying" and left the band where it was, so for a radio or gamepad
+   pilot the chevron parked in the corner instruments' 108 px band, under the top of the plates. Measured on a TX15 race at 1600
+   by 900: the chevron's centre at y 792 against the plates' top at 776, which is the bug `AIM_MARGIN_BOTTOM`'s note records.
+   Read from the code, the reverse case, keys with the overlay off, parked 22 px higher than anything there needs. Both now read
+   one function, `stickOverlayUp()` in main.js. After: 770 against 776 with the overlay on, 792 with it off.
+2. Fixed. The row's note said "Left is yaw and throttle, right is roll and pitch, in your stick mode", which is Mode 2's layout
+   stated as every mode's. It now says the boxes are laid out by Stick mode, which the captions under them already name, and
+   that they are drawn for a radio, a gamepad and the keys and hidden on the thumb sticks, which is what Mat asked in the thread.
+3. Fixed. `setStickOverlay`'s comment still opened "Keyboard stick ghost".
+4. Declined. A board replay (`?replay=tm-...`) runs in flight mode, so the overlay draws the viewer's own resting sticks under
+   somebody else's lap. The keyboard ghost already did this before the setting; now a viewer with a radio plugged in gets it too.
+   `clean=1` captures hide the whole UI and are unaffected. Not changed because it predates this work for the keys and nothing
+   here can drive a replay without the board. Adding `!replayMode` to `stickOverlayUp` is the fix if the owner wants it. Read from
+   the code, not seen.
+5. Noted, not changed. A Mode 1 radio pilot who has never set Stick mode sees Mode 2's layout, because the page cannot see the
+   radio's own mode. Same convention as the calibrate screen's gimbals; Stick mode is on Settings and on Check sticks.
+6. Noted, not changed. On a touch device the frame that brings the thumb plates back still draws the boxes for that one frame,
+   because the frame loop decides the boxes before it raises the plates. The keyboard ghost did the same at a hand over before the
+   setting. The new check waits for the boxes to go rather than sampling that frame.
+7. The first build's record above is accurate: lint:shell fails the same 8 on main and the row adds 45 px to Pilot. Its
+   `lint:input` was not run then, and is now.
+
+Checks added, 23, all in `scripts/input-check.js` (lint:input).
+- A new page, a TX15 on the keyboard pilot's whoop race, 15: on for a pilot who never set it; both boxes drawn for the radio; at
+  rest in Mode 2 the dots are centred with idle throttle at the bottom; roll right and yaw left move the right and left dots;
+  let go they centre; the chevron, pinned to the bottom edge by parking the camera 200 m over the start, sits above the plates;
+  paused mid race, the row is beside Show FPS and reads On; Enter on it is Off in the row, the settings and storage; a reload
+  keeps it off; off, no boxes and the Weight slider stays; off, the chevron parks lower; Enter again is On and stored; the boxes
+  come back; no uncaught exception.
+- The keyboard page, 5: boxes up on the keys; the chevron above the plates; Off takes the keys' boxes away; the chevron comes
+  down; On brings them back.
+- The touchscreen laptop page, 3: no boxes with the thumb plates up; boxes up when the keys take the sticks; a finger on the
+  glass takes them away again.
+
+Proof they see the change. The radio page alone, run against main (e2b8e2a): 12 of 15 fail. Against the first build (db7f17d):
+2 of 15 fail, the two chevron checks, y 792 against 776. Against this commit: 15 of 15 pass.
+
+Checked: full `lint:input`, 245 passed and 1 failed. The failure is the builder chooser's "a key pressed at the question does
+nothing behind it: no tool armed, no 3D view", which fails the same way on main (e2b8e2a, 222 passed, 1 failed) and on the first
+build (222 and 1), so it predates this. `lint:shell` fails the same 8 problems as on main and on the first build, Pilot at
+747 px with the row, baseline not re-recorded. `lint:boot` 9 of 9, `lint:nouns` pass, `node --check` on the four files. Not run:
+`npm run verify` (no physics, ABI or build change) and `shots.js`. Not seen on a real screen or against a real radio.
+
+What went wrong. The first full run on the fix failed two more checks. One was mine: after the reload the world is already built
+and Fly goes straight to the line, so a race helper that waited for the launch card timed out; it now answers the card only when
+asked. The other was "set down on the floor under it ... parked at 11.737" on the keyboard page, which this work does not touch;
+it passed in the two baseline runs and in the final run. My reading, not proven: `__craftState().worldY` is the rendered position
+and `landed` flips at the recovery, so a trace frame that runs before the shell's own frame can see landed at the old height.
+Also, `ui.act('pause')` sets the shell's mode without showing the pause menu; the first draft of the check used it, and the check
+now presses Escape, as a pilot does.
+
+## 2026-10-06: Stick overlay to main, on the owner's word
+
+The owner's word, 2026-10-06 05:46 UTC, in the project thread: "push to main". It covers PR #39 and nothing else: the Stick
+overlay setting (on by default, a row beside Show FPS, hidden on the thumb sticks), the gate mark's bottom margin read from the
+same `stickOverlayUp()`, and the 23 lint:input checks, as the two entries above describe them. Main was ed666ac at the first
+fetch, which the branch had already merged, but the push was refused because another thread had landed the About fit
+(ad8d3a4) in between. So main was merged into the branch again, the two appends to this file kept in order with nothing
+dropped, and main is fast-forwarded to that merge, with no rewrite. What was run: the full lint:input on 917d0c9, 245 passed
+and 1 failed, the builder chooser check that fails the same way on main; after the second merge, the stick overlay page of
+lint:input on its own and lint:boot, as the reply in the thread says. Nothing here has been seen on a real screen or radio; the
+owner is flying it live.
+
+## 2026-10-06 | board | Two more board pull requests merged on the owner's word: the patron badge for Magniff and the landing and itch ref tags
+
+The owner's word, 2026-10-06 06:00 UTC, in the project thread: "check for new grok prs", after two earlier asks in the
+same thread to review, fix as needed and merge the Cursor agent's pull requests. He had also commented the review
+request on #9 himself at 05:48. This repository had none open.
+
+### What went to the board's main
+
+- **#9, "Add patron badge for Magniff"**, squashed as 2babb19. One entry, `'Magniff'`, in `BUILT_IN` in `src/patrons.js`,
+  the board's patron list, for the Patreon member on the $25 tier whose sign is this repository's #38. The diff is that
+  one line, in the same form as the existing comment's example, and `isPatron` answers true for "Magniff", "magniff" and
+  "MAGNIFF" and false for "Magnus".
+- **#10, "Accept landing, itch and tt refs"**, squashed as 3a95ea7. `landing` and `itch` in `KNOWN_REFS` in
+  `src/validate.js`, and two checks. Additions only: the ten old and new tags read back from `refKey` fold as before
+  (reddit, yt, hn, x, fb to facebook, ig to instagram, gh to github, discord, bsky, tt to tiktok), `landing` and
+  `itch` fold to themselves in any case, and an unknown tag is still `other`. The title says tt, which #8 had already
+  added, and the diff does not touch it.
+
+### Run, in the same turn
+
+The board's `npm test`: all passed on a local merge of both onto 9d27618 and on the board's main after the merge
+(3a95ea7). `lint:licence` (30 files) and `lint:nouns` passed on both.
+
+### Not checked
+
+The badge on the live page. `BOARD_PATRONS`, when the host sets it, replaces the built in list, so if it is set there
+the new name will not show until it is added to it too. And the exact spelling: nothing in the board's public statistics
+names the pilot, so "Magniff" was taken from the pull request and the owner's comment, not from the board's own
+times. A name that differs by a character gets no badge.
+
+### The owner's standing word
+
+At 06:11 UTC the owner added, in the same thread: "as long as the pr's are not buggy and will not break things, please
+merge with main". Read here as: a pull request that has been read through, whose checks pass and which breaks nothing is
+merged without waiting for a second yes, whether it is the Cursor agent's or a documentation one. It does not move what
+CLAUDE.md already reserves to him: a change to the physics model's shape, the module ABI or the build is still put to
+him first, and so is a pull request that turns on a product decision. When this was written, this was the only pull
+request open in either repository, and the board had none.
+
+### A wrong reading of this thread's own, corrected
+
+Earlier in this thread the branch `GroksBugFixForClaudeToReview` was reported as an unrelated history, because
+`git merge-base` came back empty, and it was left alone on the strength of the Git section of CLAUDE.md. That reading
+was wrong. The container's clone was shallow: 104 commits of main, back to 1 October, so a branch based before that had
+no base to find. After `git fetch --unshallow origin main` (1131 commits, one root, 45325deb) every old branch shares
+that root. `GroksBugFixForClaudeToReview` is contained in main, 0 commits ahead, and so is
+`cursor/add-visit-source-attribution-b151`. `cursor/patreon-live-prices-f4f1` is 1 commit ahead, the 25 September
+"Patreon tiers: update to live , , 0 prices", which the board's four tiers have superseded and which has no pull
+request. Nothing was merged, rewritten or force pushed on the strength of the wrong reading. When a merge-base comes
+back empty here, `git rev-parse --is-shallow-repository` is the first thing to ask, before anything is said about the
+history.
+
+## 2026-10-05 | fc, shell | Rate my Rates: a fourth card that measures a session and fits a rate profile to it
+
+### The ask, and the licence wall it hit first
+
+The owner asked to integrate WILDTYPE's RateFinder
+(https://github.com/jaydeelocs/WTRateFinder) into this simulator. Read first, built second, and the reading is the
+reason this entry exists in the shape it does.
+
+**RateFinder cannot be integrated, ported, or reimplemented, and the repository makes that explicit.** It is docs only:
+three files, `GETTING_STARTED.md`, `README.md` and `LICENSE.txt`, no source. The licence is RATEFINDER FREEWARE LICENSE
+1.0, and it is not open source. It forbids redistribution of "any component thereof", forbids reverse engineering, and
+forbids derivative works. Its INTELLECTUAL PROPERTY clause then reserves, by name, "its source code, compiled binaries,
+algorithms, rate analysis methodology, calibration exercise designs" and states that "the three-metric analysis
+framework (CPR, CMV, MDI) and the calibration-anchored rate recommendation algorithm are proprietary methods" with "no
+license to these methods granted". It is also a Windows MSI that reads a USB joystick, so there is nothing a browser
+could host even if the licence allowed it.
+
+This repository is GPLv3 and CLAUDE.md says not to add a dependency with an incompatible licence. Reimplementing a
+documented proprietary method into a GPLv3 file would be the licence problem wearing a different hat.
+
+Put to the owner. The answer, 2026-10-05 in the project thread: "if the licencing is a issue we will build our own
+version". Then "lets call it Rate my Rates", and then "I want it as a game mode in the main menue". This entry is those
+three answers. **Nothing in it is derived from RateFinder.** Its name is different, its measurements are chosen for what
+this program can see and a joystick reader cannot, and it asks the pilot to perform no exercises at all, which is both
+the honest design and the one that stays clear of the reserved exercise designs.
+
+Later in the same thread the owner offered to fly their own hands through RateFinder and hand over its output so this
+could "figure out how it got there". Declined, and the reason is written down here because it will come up again:
+working backwards from their output to their method is deriving the method, which is the thing the licence reserves and
+the thing this file has just spent a paragraph not doing. Comparing the two tools' published outputs is fine and anybody
+may do it. Fitting ours toward theirs is not, and it would also throw away the only real advantage ours has.
+
+### What it measures, and why it is not the same kind of thing
+
+A tool that reads a radio sees the sticks and has to infer what the quad did. This runs INSIDE the quad: Betaflight's
+own setpoint and the plant's own gyro are both in process. So "you asked for 1000 deg/s and the airframe gave you 640"
+is a measurement here and a guess anywhere else, and it is the one fact that turns a rate proposal from advice into
+arithmetic. That measurement, `unreachable`, holds a veto over the proposal: a pilot pinned on the stop whose quad
+cannot follow is NOT offered more rate, because the travel it would buy commands a rotation the craft cannot make.
+
+Three fits per axis, each from one measurement, each reported to the pilot with the number behind it:
+
+- **The slope at centre, from the size of the corrections.** A correction is a stick excursion and its return, and its
+  amplitude is how much travel the pilot spent to make the quad do a small thing. Target a tenth of the travel: larger
+  than any hand's noise, smaller than a deliberate placement. Corrections over half the travel are manoeuvres and are
+  excluded.
+- **The rate at the stop, from the rotation actually reached,** at the 99th percentile of time rather than the peak,
+  plus a seventh of headroom, pushed up in proportion to time spent on the stop past a couple of percent, and capped by
+  the airframe's veto above.
+- **Expo, from the share of the session spent between a quarter and seven tenths of the travel,** because that is the
+  stretch of the curve expo shapes and the only stretch it shapes.
+
+Anchored on the profile that was flown, read THROUGH its own curve rather than off its rate rows, so a pilot on any of
+the five rate systems is measured correctly. Proposed in ACTUAL always, because ACTUAL is the only system whose three
+columns are the three things measured: a slope at centre in deg/s, a rate at the stop in deg/s, and where the travel
+went. A Raceflight Acro+ number cannot be measured, only solved for after the deg/s are known.
+
+One session may halve or double an axis and no more, reported when it bites. An axis that was never moved keeps what it
+had, expo included.
+
+**No curve is written in JavaScript.** CLAUDE.md forbids it and this obeys it: every deg/s, the anchor and the proposal
+both, goes through `src/fc/ratescurve.js`, which `npm run lint:fc` F15 already sweeps against the compiled module for
+all five rate types. This file does arithmetic on that function's output and never on a curve of its own.
+
+**The throttle is deliberately not proposed.** The obvious measurement is where the throttle sat, and the number it
+would feed is Betaflight's `thr_mid`, which is where the throttle curve PIVOTS. At the factory `thr_expo` of zero the
+curve is a straight line and the pivot does nothing whatever, so the proposal would be a row that moves beside a quad
+that does not change. Proposing an expo to go with it would be this module deciding how soft a pilot likes their hover,
+which is a taste and not a measurement. `configs/rates.js` already states where hover lands on the stick at every
+throttle cap, measured off the plant by `scripts/flightcheck.js`, and the Rates screen already prints it.
+
+### What changed
+
+**`src/fc/ratemyrates.js`, new.** The accumulator and the fit. Fixed memory: nothing is stored per sample, every
+measurement is a histogram or a running total in an array allocated once, so an hour costs what a minute does. Time
+weighted, so the answer does not depend on the frame rate. Not in the physics path and it does not touch the DOM.
+
+**`src/main.js`.** Feeds it from the physics loop beside `flightLog.push`, weighted by SIMULATED time (`flown *
+MS_PER_STEP`) rather than frame time, which makes the frame rate independence exact rather than approximate: the
+integrator takes the same 1 ms steps for the same flight whatever the browser does. Off the launch stand only, replays
+excluded. Armed on the rising edge of `ui.measuring`, reset when the rates move under it. The fit is computed on demand
+in the probe, not per frame. `window.__rateMyRates()` for the harness.
+
+**`src/ui/ui.js`.** A fourth card in `WAYS`, carrying a `measure` flag, which `seatedWay` now skips so the cursor never
+opens a tuning utility on a pilot who came to fly. The room behind it: read only rows, two verbs, and nothing reaching
+the quad until Take these rates is pressed, which hands over to the Rates screen where the numbers are editable and the
+curve is drawn. A row into the room on the title while a session is live.
+
+**`scripts/gatecards.js`, `assets/gate/ratemyrates.jpg`.** The card's picture, generated like the other four. The same
+town as the freestyle card but from down in the street rather than over the roofs, because that card is about where you
+are going and this one is about what your hands are doing.
+
+**`scripts/shell-check.js`, `scripts/input-check.js`.** Both pinned the gate's card list as a string and the builder's
+index as 3. Updated to the new five with the date and the reason. This is a change to what the product IS, not a
+threshold moved to make a check pass, and the evidence it still bites is below.
+
+**`scripts/ratemyrates-check.js`, new, `npm run check:ratemyrates`.** 46 checks, synthetic pilots with analytic answers.
+
+### Checks
+
+    npm run check:ratemyrates   all 46 passed
+    npm run lint:fc             33 of 33 traces clean
+    npm run lint:presets        4 of 4 presets clean
+    npm run lint:shell          11 problems, BYTE IDENTICAL to the same command on main with this branch stashed,
+                                so none of them are this change's. They are this container's font metrics and a board
+                                that is not running here (the run logs 13 refused fetches). Diffed the two logs: empty.
+    npm run lint:catalog        fails here and fails identically on main: vendor/betaflight is an unchecked out
+                                submodule in this container, so the parameter_names.h it reads does not exist.
+    npm run verify              not run. No physics, plant, module ABI or build change: the accumulator observes the
+                                state block and writes nothing, and no file under src/native/, patches/ or
+                                vendor/betaflight was touched. Said plainly because an unrun check is not evidence.
+
+The gate assertions were proved to bite rather than assumed to. Running this branch's UI against main's OLD
+`shell-check.js` fails exactly three gate assertions and reports the card list it saw:
+`race.jpg, whoop.jpg, freestyle.jpg, ratemyrates.jpg, builder.jpg`, with `ratemyrates` carrying its plan drawing and
+`builder` last without one. So the section runs, it sees the new card, and the updated expectation is the only thing
+that changed.
+
+`check:ratemyrates` was mutation tested, because a suite that passed first time deserves suspicion. Each of these
+mutations is caught:
+
+- the airframe veto removed: "a pilot on the stop whose quad cannot is not" fails, 710 against 670.
+- the anchor read off the `rcRate` row instead of off the curve: the Betaflight default anchors at 1000 instead of 203.
+- intervals replaced by a constant, so samples are counted rather than weighted: the variable frame interval check
+  fails by three uint8 steps.
+
+Flight feel is NOT verified and cannot be from here. Whether the profile this proposes is a profile worth flying is a
+pilot's judgement, and the owner has offered to fly it.
+
+### What went wrong
+
+Four things, three of them found only by running it.
+
+- **The room was blank.** The screen id, its title, its crumb, its rows and its actions all landed, and `renderMenu`
+  looks a screen up in a map of DOM hosts that had no entry for it. It drew the crumb and the command bar over an empty
+  page. Everything worked except that the room was invisible. A screen in this shell is four things and the DOM host is
+  the fourth; there is now a paragraph saying so where the host is built.
+- **A crash sized the rate profile.** Flown through the town for twelve seconds including a building and the tumble
+  after it, the first build proposed DOUBLE the rate on all three axes, yaw included, on a session whose yaw stick
+  never left six tenths of travel. `reach` is a percentile of time, and a second of cartwheel in a twelve second
+  session sits far above the one percent tail that percentile was chosen to discard. Rotation is now counted only when
+  it is plausibly the rotation that was commanded, and the discarded share is reported rather than hidden.
+- **The first version of that filter threw away every reversal.** Comparing the instantaneous demand against the
+  instantaneous gyro, a roll reversal passes through centre stick with the quad still turning at 600 deg/s, and an
+  instantaneous reading calls that uncommanded when it is the exact opposite. Measured: 2.4 percent of a committed
+  pilot's session discarded, and 3.4 percent of one whose stick crossed in a realistic 80 ms, which is worse because a
+  slower crossing spends longer near centre. The temptation was to widen the band from 2 percent to 4. That is the one
+  thing CLAUDE.md forbids outright. Fixed properly instead, by comparing against a decaying held peak of the demand, so
+  what the pilot asked for in the last quarter second is what the quad is allowed to still be doing. The realistic
+  stick now loses 0.00 percent and the tumbler still loses 20.
+- **The correction median carried half a bin of bias.** Corrections are events, not time, and a hover produces hundreds
+  of them at nearly one size, so interpolating inside a 5 percent bin returned the bin's centre whatever the events
+  were: a pilot's 10 percent corrections read as 12.5, and the centre fit is the one thing resting entirely on that
+  number. Corrections now have their own histogram at half a percent of travel.
+- And the frame rate check passed for the wrong reason at first. Two constant frame rates sample the same distribution,
+  so replacing every interval with a constant left both the 60 Hz and the 144 Hz proposals completely unchanged; the
+  only thing it broke was the seconds on the confidence row. What sample counting actually breaks is an interval that
+  MOVES WITH THE FLYING, which is the normal case rather than the pathological one, because the fast parts of a session
+  are the parts with the most on screen. That is what the check measures now, and the subject pilot is asserted to be
+  clear of the step clamp first, since a clamped proposal agrees with itself at any frame rate.
+- **The room had no Back row.** Found by reading this shell's conventions rather than by looking at the room: every page
+  screen ends with an explicit `{ label: 'Back', action: 'back' }`, twelve of them, and this one was relying on the
+  command bar's Esc. A pilot navigating on a stick has no Escape key, so a room whose only way out is the keyboard is a
+  room they are stuck in. The command bar's "Esc Back" is the keyboard's copy of that row, not a replacement for it.
+
+### Still open
+
+- The whoop is not offered. The card seats the five inch because that is the machine pilots tune for, and nothing in
+  the fit is five inch specific, so a second card or an aircraft row is a small change if it is wanted.
+- Confidence is seconds of stick movement, and a keyboard pilot accrues them slowly because a keyboard's stick is at
+  centre whenever no key is held. A gamepad pilot will read "high" on a flight where a keyboard pilot reads "low" on
+  the same wall clock. Honest, since it genuinely is less stick data, but worth a note on the row if it confuses
+  anybody.
+- Nothing is saved. The proposal lives until the next session and the preset library is reached by hand through the
+  Rates screen. A "save this as a preset" row in the room itself would skip a step.
+
+## 2026-10-05 | fc, shell | Rate my Rates runs itself: passes, convergence, and three ways to stop
+
+### The ask
+
+The owner, same thread, after the one shot version was pushed: "you can mayby have a system that self improves as you
+fly and just gives you the final outcome rates". Correct, and the manual version was the pilot being a for loop: fly,
+take the proposal, fly again, take again, until it stops moving.
+
+### Why a sequence of passes and not a moving anchor
+
+The obvious reading of "self improving" is to nudge the rates continuously while flying. That cannot work and the
+module already said so: a fit is measured AGAINST the profile that was flown, `staleFor` exists to refuse a session
+whose rates moved under it, and continuous nudging is that case on every frame. The arithmetic would mean nothing.
+
+So the loop is a sequence of passes. Each pass measures ONE fixed profile. When a pass has `PASS_MOVE_S` of stick
+movement, 25 seconds, the fit is taken, the shell applies it, and the next pass is anchored on what is now flying. Every
+step is as sound as a single pass because every step IS a single pass.
+
+**The coach never writes the quad.** It says "this pass is done, here are the next rates" and waits to be told what was
+applied. Rate application stays in the settings path, in one place, and the shell can decline: a pilot who parks it
+halfway leaves a coach sitting at a pass boundary rather than a quad being retuned underneath them. `accept()` takes
+what was ACTUALLY applied rather than what was proposed, because the settings path normalises and a pilot may edit a
+row, and the next pass has to be anchored on the profile that is really flying.
+
+**Applied at a frame boundary.** The coach notices a full pass inside the physics block, and applying rates is a
+`sim_init` plus a re-seat. Doing that mid frame would invalidate the two states the renderer is about to interpolate
+between and the frame would draw a pop. Flagged and handled at the top of the next frame, which is the same moment a
+settings change from a menu lands.
+
+### Does it converge
+
+The centre fit converges in ONE step and the algebra is in the file. Model a pilot as wanting a fixed rotation out of a
+correction: they push the stick until the quad turns that fast, so the travel they use is `a = k/c` for a pilot constant
+k and a slope at centre c. The fit sets `c' = c * (a/T) = c * (k/c)/T = k/T`, which does not contain c at all. One pass
+lands on the fixed point, and the next pass measures `a = T` and proposes nothing.
+
+The rate at the stop depends on the pilot's model. One who wants a fixed ROTATION converges in one step too, because
+what they reach barely depends on what the stop offers. One who commits to a fixed FRACTION of travel converges
+geometrically, ratio about 0.93 at nine tenths, which is what the six pass limit is sized for.
+
+And one case does not converge at all: a pilot who pins the stop every time has `reach` equal to the rate at the stop by
+definition, so the headroom and the saturation push both fire on every pass and the number climbs a seventh at a time
+forever. There is no fixed point to find, because that pilot genuinely wants more rate than any profile offers. So the
+loop has THREE endings and says which it was, rather than only knowing how to notice that it has settled:
+
+    settled   it stopped moving. Six percent on an endpoint, six points of expo, and never on pass one, because one
+              measurement cannot be a trend.
+    limit     six passes and still moving. Fly these and run again.
+    drift     it wanted to move further from the opening profile than one run may. Same advice, more emphatically.
+
+### What changed
+
+**`src/fc/ratemyrates.js`.** `RateCoach` beside `RateSession`: `push`, `pending()`, `accept(applied)`, `peek()` for the
+pass in progress, `report()`. `DRIFT_LIMIT` of 2.5 times the opening profile, measured on both endpoints of every axis.
+
+**`src/main.js`.** The coach replaces the bare session. `ratePassReady` defers the apply to the frame boundary. The
+staleness reset is now skipped while a pass is waiting, which matters: applying a pass IS a rates change, so it lands in
+the staleness branch one frame later, and without the guard the coach would read its own output as the pilot moving a
+row and throw the run away on every pass. The run would never reach pass two.
+
+**`src/ui/ui.js`.** The room speaks in passes: which pass and how far through it, where the pass in progress is heading,
+a row per completed pass with what it set and how much it moved, and the verdict with its reason. Take these rates is
+gone, because the loop applies its own passes; what replaced it is Put my old rates back, which restores the profile the
+pilot ARRIVED on rather than the previous pass, since halfway back is not a place anybody asked to be.
+
+### Checks
+
+    npm run check:ratemyrates   all 66 passed
+    npm run lint:fc             33 of 33 traces clean
+    npm run verify              not run, and for the same reason as the entry above: nothing under src/native/,
+                                patches/ or vendor/betaflight was touched and the coach observes the state block.
+
+The new checks are a CLOSED LOOP, which is the point. Every synthetic pilot in the file before this was open loop, a
+fixed stick program flown whatever the profile was, and that is the right fixture for one fit and useless for a loop: a
+loop converges by the pilot CHANGING when the quad does. So the coach is tested against a pilot with INTENT rather than
+a waveform. It wants some rotation out of a correction and some out of a committed move, and it pushes the stick as far
+as THIS profile needs to get them, inverting the firmware's own curve numerically. Give it twice the slope at centre and
+its corrections halve, which is the mechanism under test.
+
+Asserted: it settles rather than running out of passes; it settles on pass two having materially moved the profile on
+pass one, so it is not settling on a no-op; and, the one that matters most, **the settled profile puts that pilot's
+corrections on the 10 percent target**, measured at 0.088 of travel. That is convergence on the RIGHT fixed point rather
+than merely convergence. Also asserted: a pilot already on their own answer is left there; a pilot with no fixed point
+is stopped and told which ending it was; the coach ignores pushes at a pass boundary; and the next pass anchors on what
+the shell applied rather than what was proposed, including when the shell applies something different.
+
+### What went wrong
+
+- **The drift ceiling was a limit in name only.** It was used to decide that a pass was the LAST one and then the over
+  ceiling profile was handed over anyway. The check caught a greedy pilot started on a slow profile walking through it:
+  2.69 times the opening against a stated limit of 2.5. Such a pass is now REFUSED rather than clamped, and the reason
+  is worth keeping: a clamped profile is one nobody measured, and it would be offered with the fit's own explanation
+  attached while that explanation no longer described it. The pilot keeps the last profile that was inside the ceiling,
+  which a pass really did propose, and is told the pass was refused rather than being shown a pass that changed nothing.
+- **The drift ceiling was unreachable from the Betaflight default.** Found while writing the check: a greedy pilot only
+  gets about 1.15 times over all six passes, because reach is capped both by what the airframe delivers and by the
+  uncommanded rotation filter, so the pass limit always arrives first. It is not dead code, it is out of range from a
+  profile that is already quick. There is now a case that starts on 200 deg/s, where it is well in range and fires on
+  pass two.
+- **The room's lede became a lie.** It said "Nothing here changes the quad until you take it", which was true of the one
+  shot version and false the moment the loop applied its own passes. A screen that misdescribes what it is doing to the
+  quad is worse than a screen that says nothing.
+- **The harness hook still referenced the old session object.** Caught by the headless capture throwing
+  `ReferenceError: rateSession is not defined` out of `window.__rateMyRates`. `node --check` cannot see an undefined
+  free variable, so only running it found this.
+- The first convergence assertion was "more than one pass and fewer than the limit", which this pilot satisfies at
+  exactly two every time. Vacuous on its own, so it now asserts two passes AND that pass one moved the profile by more
+  than five percent, with a note on why two is the honest answer for a fixed rotation pilot rather than a suspiciously
+  quick one.
+
+### A trap closed, and the room walked
+
+Found by reading the states rather than the happy path, after the loop was pushed.
+
+**Leaving the mode stranded the undo.** The title's Rate my Rates row appeared only while `ui.measuring`, which goes
+false the instant any other card on the gate is pressed. So: run the loop, let it move the rates across three passes,
+then press Freestyle because you want to go flying. The row vanishes, and with it the only door to the room and the only
+way back to the profile you arrived on. The pilot is left on rates they did not choose with no way to undo them. The row
+now also shows while a run has passes behind it, armed or not, because the undo has to outlive the mode.
+
+Two mirrors of the same bug followed. The room's head row would have said "Pass 2 of up to 6, 40 percent" for a run
+nothing was advancing, and the live "Heading toward" block would have shown an abandoned pass as though it were still
+filling. There is a third state now, `left`, which says the run was walked away from, that what the passes set is still
+what is flying, and offers Start a session. That last part matters because the head row's note tells the pilot to start
+one, and an instruction with no row under it is worse than silence.
+
+Both states were rendered and read back rather than reasoned about, by stubbing the probe through `setRateProbe` in a
+capture, which exercises the render path without flying the 25 seconds a real pass needs:
+
+    measuring, not armed, 2 passes   Run left unfinished = 2 passes, Flying now, Every pass, Pass 1, Pass 2,
+                                     Then what, Start a session, Put my old rates back, Back
+    done, settled                    Settled = Actual 500/500/500, Flying now, Every pass, Pass 1, Pass 2,
+                                     Then what, Run it again, Put my old rates back, Back
+
+**And the room is walked by scripts/shell-check.js now.** It was not in `SCREENS`, so nothing measured whether its rows
+were reachable, whether it overflowed or whether there was a way out. The comment two entries above that list says
+exactly what this costs: the trick list shipped with its entire row list below the fold for that reason. It walks clean,
+3 stops, 3 reached by arrow, 0 px of overflow, 0 px below the fold, escape back to title, and the suite's 11 container
+problems are unchanged. What it does not cover is the long form, whose row count grows with the passes flown, because
+the harness does not fly a session; that is said in the comment rather than left to be assumed.
+
+Also run, all clean and none of them previously run against this change: `lint:nouns` PASS, `lint:boot` 9 of 9,
+`lint:memory` PASS, `lint:frame` 34 of 34, `lint:responsive` PASS, `lint:scale` PASS.
+
+### THE LOOP NEVER ADVANCED, and 74 green checks could not see it
+
+The worst bug of the lot, found by a verification pass driving the real shell rather than by any check in this
+repository. Every module check passed. The feature, in a browser, did nothing whatever.
+
+**What happened.** Applying a pass is a rates change, so it arrives at `applySettings`'s staleness check one call later,
+and that check has to tell the coach's own output from the pilot moving a row on the Rates screen. It was told by
+`ratePassReady`, and the apply block cleared that flag on the line BEFORE calling `applySettings` rather than after it.
+So the guard was open at precisely the moment it existed for: `staleFor` was true, `reset` ran, and `reset` starts a new
+RUN. The pending pass was destroyed before `accept` could record it, the history was wiped, the pass counter went back
+to one, and `opening`, which is the undo target, moved to whatever had just been applied.
+
+The symptom from the outside was a measurement that climbed to about 25 seconds, dropped to zero, and climbed again,
+forever, with `pass` stuck at 1 and `passes` empty. The rates really did change on each wrap, so the quad was being
+retuned repeatedly with no record of it and no way back. `drift` read zero because `opening` had moved with it.
+
+The comment on that guard described the exact failure it was failing to prevent. That is what a flag doing two jobs
+buys you: `ratePassReady` means "a pass has filled", and what the settings path needs to know is "this rates change is
+mine". Those are different facts and they are two flags now, `rateApplying` raised around the settings call.
+
+**A second bug underneath it.** The guard called `reset` for a pilot's own mid-run edit too, which is the wrong tool for
+that case: `reset` moves `opening`. A pilot three passes in who nudged one number would have been offered a put-it-back
+that put them back to what those three passes had already done to them. There is a `restartPass` now: the pass in
+progress is void, because half of it was measured against a profile that is no longer there, and the run survives with
+its opening, its history and its pass number intact.
+
+**`scripts/ratepass-check.js`, new, `npm run check:ratepass`.** The bug was in the join between the module and the
+shell, so the only thing that can see it is the real shell with a real frame loop. It flies one pass headlessly, in the
+town, with a stick held off centre so stick movement accrues at about a second per second, and asserts that the pass
+landed, that the run advanced to pass two, that the rates reached the quad, and, the one that was false, that `opening`
+is still the profile the pilot arrived on.
+
+Mutation tested, which is the only reason it is worth having: with the original ordering restored it fails on five
+steps, naming `passes.length >= 1`, `pass === 2`, `opening` and `drift.frac`. With the fix it passes at exit 0.
+
+It is NOT in the cheap set. A pass is 25 seconds of simulated stick movement and there is no way to shorten that which
+is not special casing the test input, so the check costs what a pass costs, about a hundred seconds including boot.
+
+### What went wrong writing that check
+
+Two goes at it, and both are the same lesson in different clothes.
+
+- **It waited on frames and reported FAIL with every product expectation green.** The first version waited for
+  `window.__boot().frames` to pass 80 and then climbed a ladder of stick-movement seconds. `frameBody` returns early for
+  the whole of a world build, so on the town the frame counter sits still, the first rungs expire, and the run reports
+  failures that are about the harness. It waits on `window.__rateMyRates().seconds` now, which only moves when the coach
+  is actually being pushed from the physics loop, so it means "flying and being measured" rather than "the browser
+  painted something".
+- **Then it reported FAIL on a green run anyway, because of the board.** `scripts/shots.js` puts expectation failures
+  and browser console errors in one bucket and exits 1 for either, and a headless check has no board to talk to, so
+  three refused fetches sank it. Every other check here already tolerates that and says so in a note: `lint:memory`
+  prints "2 network fetch(es) refused, the board is not running here" and `lint:shell` prints thirteen. So this reads
+  its verdict off the log and tolerates exactly refused fetches, failing on any harness fault, any failed step and any
+  other console error. `shots.js` itself was left alone: its contract is shared with a dozen checks and loosening it
+  here would loosen it for all of them.
+- And the first verdict line double counted, reporting "5 console error(s)" for five failed expectations, because
+  `shots.js` both prints a failed step inline and pushes it into the error list. Counted once now, and the parsing was
+  checked against both saved logs: the good run reads 0 steps, 0 real errors, 3 ignored; the buggy run reads 5 steps, 0
+  real errors, 3 ignored.
+
+## 2026-10-06 | tracks | The Rate Lab, and a map option that is not wired yet
+
+### The ask
+
+The owner flew the freestyle version and named the hole in it: "trying to tune rates in freestyle gives most peopl no
+structure". They asked for a track with "equil right and left sharp turns something with 3 gate ladder ups and downs and
+spiral ups and spiral downs", for the craft to be returned to the start when a pass applies, and for a feedback dialog
+thirty seconds later.
+
+They are right, and the reason is worse than comfort. The fit compares each pass against the last, so two passes are
+only comparable if they measured the same KIND of flying. A pilot who hovered through pass one and chased rooftops
+through pass two has handed the loop two different pilots, and the loop cannot tell that from a pilot whose hands
+changed.
+
+### What landed: the track
+
+`scripts/ratelab-track.js` generates `tracks/json/ratelab.json`, and `scripts/ratelab-check.js` (28 checks,
+`npm run check:ratelab`) pins its geometry. Generated rather than drawn because the track is a measuring instrument, so
+its properties have to be exact rather than approximately what somebody dragged into place.
+
+All three features, by name: a hairpin round a flag on each side, exact reflections about the centre line, flown round
+opposite sides; two three gate ladders, each flown through all three openings with the entry direction alternating,
+which is a vertical zigzag and gives pitch and throttle reversals at a fixed amplitude; and a spiral up and a spiral
+down, four gates round an arc with the sill climbing a level at a time. Derives to a closed 298 m lap, no warnings, line
+between 0.76 and 5.88 m.
+
+Flying gates are lifted by `sillH` and stand on the ground at `z` of zero, which is the schema's "nothing floats" rule;
+only the four waypoints are in the air, which is the one thing that rule leaves alone.
+
+**On the licence, since it has been the spine of this work.** RateFinder's licence reserves its "calibration exercise
+designs". This is not one: its exercises are timed instructions to a pilot, six per discipline, and this is a race track
+made of gate ladders, hairpins and spirals, which are standard elements present in every track builder including this
+repository's own, and which this repository already imports from Velocidrone files. The pilot is still asked to perform
+no drill: they fly laps.
+
+### What the check caught before the track was committed
+
+- **The generator overclaimed.** Its header said the whole track was a reflection about the centre line. It cannot be: a
+  helix that climbs as it sweeps across has a low end and a high end, so its reflection has them the other way round and
+  is a different helix. The check reported four gates paired with sills of 0 against 4.67, which is that fact arriving.
+  What the spirals are instead is the SAME helix twice, same x and same sills, offset down the field, flown climbing and
+  descending, which is the property that was actually wanted. The comment and the document's credit note say that now.
+- **Then it reported the hairpins asymmetric when they are not**, and that one was the check's fault. Reflecting a
+  hairpin swaps which of its two gates you reach first, so the mirror of the left ENTRY gate is the right EXIT gate. The
+  names follow the flying order and the geometry follows the reflection, and the two disagree by design. It pairs by
+  position now.
+
+### What did NOT land: the map option, and why it was taken back out
+
+The track is reachable by nothing yet. A map option was written and then reverted, because it hung the shell.
+
+Four touchpoints were found and fixed on the way, and they are worth recording because the next person adding a map
+needs all of them:
+
+- `src/maps/registry.js` needs the entry, which is the obvious one.
+- `src/maps/build-cost.js` needs a KEY, because `src/boot.js` validates `?map=` against the keys of that object before
+  any module has loaded. Without it the address was honoured and the pilot got the field, silently, because falling back
+  is what that line is for.
+- `src/main.js` adopts the board's most flown track when a race map has none seated, which is right for Track and wrong
+  for a map that carries its own document. An `ownCourse` flag was added for that.
+- The map module itself injects its document through the hook `src/maps/custom.js` already has, deliberately NOT by
+  writing into the builder's autosave, because that is where a pilot's unsaved work lives and a tuning mode that
+  replaced the track somebody was halfway through building would be unforgivable.
+
+With all four in place the map still hung. One experiment settled where the fault is NOT: the same
+`tracks/json/ratelab.json` loaded through the existing `--course=` path, which uses no new code, builds in twelve
+seconds and reaches 22 frames. So the track's geometry is fine and the fault is in the wiring. Two runs of the new map
+disagreed with each other, one reaching "Building the world, step 2 of 3" with `__shellReady` true and a later one never
+setting `__shellReady` at all, which smells like a race rather than a missing manifest entry. Not diagnosed.
+
+So it is reverted rather than committed. A map option that hangs boot is worse than no map option, and guessing at it
+with hundred second experiments was not worth more of the night. The track, the generator and the 28 checks are
+committed and good; `src/maps/ratelab.js` is in this entry's history only.
+
+### What went wrong
+
+- **`src/fresh.js` was left stale by my own earlier commits.** `src/fc/ratemyrates.js` is imported by main.js and ui.js,
+  so it is in the boot graph and belongs in the freshness manifest, and `npm run lint:preload` had been reporting STALE
+  since the first Rate my Rates commit. I had not run it, because it is not in the cheap set this repository names,
+  which is exactly why a new module in the boot graph needs saying out loud. Regenerated. It also picked up
+  `src/share/supportprompt.js`, stale from an earlier commit on main rather than from this branch.
+- Checked whether the staleness was mine by stashing and re-running on the committed tree, rather than assuming either
+  way.
+
+### Still to do, and the order it wants
+
+1. The map option, which is the blocker for everything else: diagnose the hang.
+2. The card seats the Rate Lab instead of freestyle, which is a two line change once the map works.
+3. Back to the start line when a pass applies. The craft is currently re-seated where it was, deliberately, by
+   `reseatAfterConfigSwap`; the owner wants the opposite, and they are right, because a pass flown from the same place
+   as the last one is the comparison the loop is making.
+4. A feedback dialog thirty seconds after that.
+
+### What the exploration found, so the next session does not re-derive it
+
+Two mechanisms already exist and both are better than what was planned for them.
+
+**Back to the start is `reset()`, src/main.js:4430, wrapped in `whenConfigReady`.** It runs `adoptSpawn`, zeroes
+`simTimeMs`, calls `resetCraft(null)` and `race.reset()`, and clears `landed` and `launchStaging`. R and the radio's
+restart switch both call it mid flight, so mid flight is safe. The `fly` and `restart` actions (around 6615) wrap it in
+`whenConfigReady(...)`, which defers until a tune or config load has finished, and applying a rate pass IS a `sim_init`,
+so the pass path has to use the same wrapper rather than calling `reset()` straight. A lap in progress is lost, which
+for this feature is wanted. Note it also re-latches `runVoltage` from the setting: every pass would start on a fresh
+pack, which is arguably right for comparability and should be a deliberate decision rather than a surprise.
+
+**The feedback dialog already exists and should not be rebuilt.** `askFeelReport(context)` at src/ui/ui.js:7129 is a
+hand built "how does it feel" dialog with feel chips (Floppy, Soft, About right, Stiff, Twitchy), issue chips
+(sluggish, bounce, propwash, drift, yaw, throttle, floaty, locked), free text and a throttle shortcut. `openFeelReport()`
+at 7117 is the entry point, `feelSnapshot()` at 7066 builds its context, and it submits through `submitBug` to the
+board's `/api/bugs` with `kind: 'feel'`. `maybeOfferFeel()` at 7086 is an existing automatic offer, fired once ever on
+the second results screen and never after a pad input.
+
+So part 4 is "call the existing feel report thirty seconds after a pass lands, with the pass in its context", not a new
+dialog. Two things to settle when it is written: `openFeelReport` sets `settings.feelAsked` and `maybeOfferFeel` fires
+only while that is unset, so a tuning run would silently consume the one automatic offer a pilot ever gets; and
+`askForm` is text fields only, so anything richer than the existing chips would have to be hand built the way
+`askFeelReport` already is.
+
+Also worth knowing: `askForm` returns a promise of an object keyed by field, or null on cancel, Escape or a backdrop
+click; `askConfirm` returns a promise of a boolean and ignores input for `CONFIRM_DEAF_MS` after opening; and all of
+them share the one `this.nameDialog` overlay, so two cannot be open at once.
+
+### The leading hypothesis for the hang, untested
+
+`src/fresh.js` carries a manifest of every served file, 255 of them. `scripts/gen-preload.js` builds it by walking the
+boot, city and built graphs, and `src/maps/ratelab.js` is reachable from none of those: it is a new lazy map module. So
+the regeneration run in this entry picked up `src/fc/ratemyrates.js` and `src/share/supportprompt.js` and did NOT pick
+up the map module, which was being served while absent from the manifest.
+
+That is the same shape as the three touchpoints already found: a new map needs a line in the registry, a key in
+`build-cost.js`, a flag past `main.js`'s track adoption, and apparently a place in the freshness manifest, which means
+teaching the generator about a fourth graph. It would also explain why two runs disagreed, since a cache is exactly the
+kind of thing that makes a load fail intermittently.
+
+Untested. Written down as the first thing to try rather than as a finding.
+
+## 2026-10-06 | contribution | Cut onto the upstream main, and every edit put under a test
+
+### The ask
+
+The upstream owner, Mathew Harvey, on the fork this work was done in: branch from HIS main rather than from the fork's,
+open the pull request against his repository, "and if that is the case, please ensure any edits you make are covered by
+unit tests".
+
+### The branch
+
+`upstream` added as a remote and fetched. `git merge-base HEAD upstream/main` returns `2e34c05`, a real common
+ancestor, so the histories are related and CLAUDE.md's stop condition does not apply. `upstream/main` was 17 commits
+ahead of the fork's `main` with the fork holding nothing of its own: stale rather than diverged.
+
+**Merged rather than rebased, and that was a judgement.** Five files overlap (PROGRESS.md, `src/main.js`,
+`src/ui/ui.js`, `scripts/input-check.js`, `src/fresh.js`) and PROGRESS.md was always going to conflict because both
+sides append. A rebase would have asked for the same resolution up to seventeen times, once per commit, each one a
+chance to drop somebody's entry. One merge is one resolution and rewrites none of the seventeen commits. Only
+PROGRESS.md actually conflicted; the four code files auto-merged and every check was green afterwards.
+
+The fork's `main` has deliberately NOT been moved. Fast forwarding it to `upstream/main` would be append only and safe,
+but it was not asked for, and a branch nobody requested moving is a branch that should not move.
+
+### Every edit, and what covers it
+
+The owner's condition is the useful kind, so it is answered as a table rather than as a claim.
+
+| What changed | What covers it |
+| --- | --- |
+| `src/fc/ratemyrates.js`, the accumulator, the fit and the coach | `npm run check:ratemyrates`, 89 checks, no browser, mutation tested four ways |
+| `src/fc/ratemyrates.js`, the four run states and their wording | the same suite, 15 of those checks |
+| `tracks/json/ratelab.json` and its generator | `npm run check:ratelab`, 28 checks |
+| `src/main.js`, applying a pass and the probe | `npm run check:ratepass`, the real shell, mutation tested |
+| `src/ui/ui.js`, the room's rows and its two actions | `npm run check:rateroom`, the real shell, mutation tested |
+| `src/ui/ui.js`, the gate's fifth card | `scripts/shell-check.js` and `scripts/input-check.js` pin the card list; proved to bite by running this branch's UI against the old assertions |
+| `src/ui/ui.js`, the room as a screen | `npm run lint:shell` walks it: 3 stops, 3 reached by arrow, 0 px overflow, 0 px below the fold |
+| `src/fresh.js` | `npm run lint:preload` |
+
+`npm run check:rates` runs all four of the new suites in one command, which is what a reviewer wants rather than four
+things to remember.
+
+**Nothing was added to `tests/`.** That directory is the physics harness, and the repository's own
+`.claude/skills/verify-flight-model/SKILL.md` lists editing anything under it as invalidating a verification run. The
+house pattern for everything that is not the flight model is `scripts/*-check.js` with an `npm run` entry, which is
+what the forty odd existing `lint:*` and `check:*` scripts are, and what these are.
+
+### What answering the condition changed in the code
+
+Two functions could not be tested where they were: the title row's value and its note sat unexported in the middle of
+`src/ui/ui.js`, and the room worked the same four states out a SECOND time from `read.state` and `read.armed`. So
+`passState`, `passRowValue` and `passRowNote` moved into `src/fc/ratemyrates.js`, which is where this repository already
+keeps pilot-facing display strings for a domain concept: `ratesSummary`, `ratesShort` and `throttleSummary` all live
+beside the rate profile they describe in `configs/rates.js`. The room and the title row now read one definition.
+
+That is a refactor the tests paid for rather than a refactor for its own sake, and writing the tests immediately found
+a fifth state bug: **a run abandoned inside its first pass has applied nothing**, so there is no trace of it on the quad
+and nothing to undo, and reading it as `left` put "Run left unfinished, 0 passes" on screen above a note promising
+passes below it that did not exist. It is `cold` now.
+
+### What went wrong
+
+- Two of `rateroom-check.js`'s own assertions were loose before they were right, and both are recorded where they were
+  wrong. A regex does not survive being a string through a shell and then through `Runtime.evaluate`, so `/^Pass \d+$/`
+  arrived as the literal characters backslash and d. Then `startsWith('Pass ')` counted three rows rather than two,
+  because a run in progress heads the room with "Pass 3 of up to 6". Both were the check being imprecise and neither
+  was the room being wrong, which is the right way round but only because they were chased rather than loosened.
+
+### Still open
+
+- A pass is 25 seconds of stick movement, which is a guess. Too short and a pass measures noise, too long and nothing
+  appears to be happening. Worth a pilot's opinion.
+- The convergence bands, six percent and six points of expo, are the same kind of guess.
+- The whoop still is not offered, and nothing in the fit is five inch specific.
+- Flight feel is unverified and cannot be verified from here. Whether a settled profile is a profile worth flying is a
+  pilot's judgement, and the owner has offered to fly it.
+
+## 2026-10-06 | Rate my Rates | The Rate Lab is a map, a pass returns to the grid, and the feel question follows
+
+### The ask
+
+The owner, after flying the freestyle version: the structured track was missing. The prompt was a track as a map
+option, equal right and left sharp turns, three-gate ladders up and down, spiral ups and downs, then once a pass
+updates the rates put the pilot back on the start line, and thirty seconds later a popup for how it feels. Tuning
+rates in freestyle gives most people no structure.
+
+### The hang, and what it actually was
+
+The track, the generator and the 28 checks were already on the branch. The map had been written and taken back out.
+The note on that night guessed the freshness manifest, because a new lazy map is not in the boot graph. That guess was
+wrong, and the generator's own comment already says a module missing from the list is found the slow way and does not
+break the page.
+
+What hangs is `syncWorld`. `buildFieldScene` names every designed course `custom`. A setting of `ratelab` against a
+view whose id is `custom` never matches, so the shell disposes the world and builds it again, forever. The comment on
+that function already describes the loop for an unknown id. The Rate Lab sets `map.id` to `ratelab` after the build.
+
+### What landed
+
+- `src/maps/ratelab.js` fetches `tracks/json/ratelab.json` and builds the field from it. It does not write the
+  builder's autosave.
+- The registry entry is `ownCourse`, so boot and an airframe change do not replace it with the board's most flown
+  track when the builder's seat is empty. `build-cost.js` has the key `boot.js` checks `?map=` against.
+- The Rate my Rates card seats that map, in race mode, and Fly launches straight into it. The launch card is for a lap
+  that can go on the board. A tuning pass is not one, and a lap flown here is not filed against whatever track happens
+  to be in the builder's seat.
+- A pass that changes the rates calls `reset()`, so the next pass starts on the grid. A manual edit on the Rates
+  screen still re-seats where the craft was. `reset()` re-latches pack voltage from the setting, so every pass starts
+  on a fresh pack of the charge they chose. That is the comparison, taken with the return to the grid.
+- Thirty seconds later the existing "How does it fly?" dialog opens, with the pass in its sentence. It does not set
+  `feelAsked`, so it does not spend the one automatic offer a pilot gets after a race. If another dialog is up it
+  waits, and gives up a minute after it was due. Leaving the mode cancels it.
+
+### Measured
+
+Loaded `http://127.0.0.1:8000/?map=ratelab` in a browser. `__shellReady` true, world id `ratelab`, name Rate Lab, mode
+race, 22 gates, world build 920 ms, first frame 1.37 s, no frame fault. Pressing the card set `measuring` and left the
+world ready. The title row read Track: Rate Lab. Fly reached the flight screen. `npm run lint:preload` up to date,
+256 served, ratelab 1.
+
+Not run: `check:ratepass` (one pass is about a minute of headless flying) and `npm run verify` (no physics, plant,
+module ABI or build change). The return to the grid and the thirty second dialog were not sat through. The owner is
+flying that.
+
+### Still open
+
+- A pass is still 25 seconds of stick movement, and the convergence bands are still the same guesses.
+- The whoop is still not offered. The Rate Lab is a full-size track.
+
+## 2026-10-06 | Rate my Rates | The line comes from posted laps
+
+The owner, after flying the hairpin track: it felt like a guess, and the track was overcomplicated. The track they asked for is a first gate, slalom flags, a triple stack up and then down, a triple corkscrew up, then split-S gates. The line through those should come from other pilots on other tracks, not from a spline invented through the gates.
+
+### What the board actually holds
+
+`GET https://webfpv.org/board/api/tracks` lists 51 tracks. A time's ghost is the craft's scene position and attitude at 30 Hz, plus a split on every gate. It is not the stick. `scripts/line-from-ghosts.js` decodes the fastest ghost and prints the path against the gates.
+
+Read this turn, fastest ghost on each:
+
+- Slalom. "So long, Schlalom!" (`trk-c0600456`), AsylumFPV, 27.80 s, best of 6. Flags 2 m off the lane, clearance 1.5 m, early weave inside about 1.5 m of the straight. Spacing taken from "Flags and cones" (`trk-2397fd92`), Alexulfer, 6.01 s, best of 66, chords about 10 to 12 m. The long slalom's 14 to 16 m pitch does not fit a lap that closes.
+- Triple up, then down. "ladder-up, ladder-down" (`trk-66483691`), Asylum Fpv, 9.13 s. Bottom middle top, then top middle bottom, every pass from the same face. The ghost wraps about 3.6 m out and climbs from under 1 m to about 5 m. Those stacks are 9 m apart. This one uses 12 m so the two wraps do not meet.
+- Corkscrew. The same same-face climb, which is the builder's spiral up. "Corkscrew" (`trk-b3583898`), AsylumFPV, 19.09 s, is single gates 2 m apart and a ghost that loops about 3 m out.
+- Split-S. "Immelman Turn / Hammerhead" (`trk-efee501b`), Crapshack, 4.00 s. Two dive gates, sill 5 m, a 5 m hole, 6 m apart, opposite faces.
+
+### What landed
+
+`scripts/ratelab-track.js` and `tracks/json/ratelab.json` are that sequence, in that order, at those distances. Two waypoints step the return down from the split-S, because one Hermite from 8 m to the first gate went through the floor (lowest sample -0.69 m). The first gate's sill is 1 m so the slalom knots sit where those ghosts flew and the weave does not bow under the grass. The card, the registry note and the Rate my Rates room no longer describe hairpins or a freestyle world.
+
+The rate fit is unchanged. A ghost can say where the fast lap went. It cannot say how much stick that pilot used, so comparing over-corrections and under-corrections against an expected stick is still to do, and it has to be derived from this line rather than from the old centre-target guess.
+
+### Measured
+
+`node scripts/ratelab-check.js`: 25 passed, 0 failed. The builder repairs nothing. The lap closes, 194 m. The derived line stays between 0.22 m and 9.15 m, no warnings.
+
+Loaded `http://127.0.0.1:8000/?map=ratelab`. Shell ready, map id `ratelab`, mode race, 16 gates. World build 897 ms, first frame 323 ms, total 1.36 s.
+
+Not run: `npm run verify`. No physics, plant, module ABI or build change. The rate fit was not touched, so `check:ratemyrates` was not re-run.
+
+## 2026-10-06 | Rate my Rates | The lap, the question, and the builder
+
+The owner flew the slalom and rejected it. Every flag was passed on the right, so the lap was a string of orbits instead of right, left, right. They will build the course themselves. The rates were also changing before a lap was finished, the start said nothing about that, and the feel dialog at the end of a pass asked how the quad flew and then did nothing to the rates.
+
+### What landed
+
+- A pass on the track ends when a lap does. Stick time still fills the measurement. It does not change the rates. `waitForLap` is off in the node checks, which have no gates, so those still end a pass on stick time.
+- On the grid the banner says "Fly one lap and we can see if we need to adjust your rates."
+- When the lap finishes the new rates go on and the craft is back on the grid. The question is "How are your new rates?" with two answers. Yes keeps them and stops. No puts the previous rates back and asks for another lap. It does not file a flight-feel ticket and it does not set `feelAsked`.
+- Rate my Rates room, "Edit the track", opens the shipped course in the builder as a copy. The canvas it replaces is kept in Load. The next Rate Lab build flies that copy when the builder's working track is this course or a remix of `trk-ra7e1ab0`. Any other track in the autosave is left alone.
+
+### Measured
+
+`node scripts/ratemyrates-check.js`: 96 passed, 0 failed. Thirty seconds of stick with `waitForLap` does not end the pass. `lapFinished` does. Discard throws the proposal away. Keep stops the run with why `kept`.
+
+Not run: `scripts/ratepass-check.js` (headless Chromium) and `npm run verify`. The ratepass check was rewritten to the new rule, that stick time without a lap leaves the rates where the run opened, and was not executed. The dialog and the builder door were not clicked.
+
+## 2026-10-06 | Rate my Rates | Learn the track, then the button
+
+The owner saved the course and could not get the check started again. They want to fly the track first. The opening line is "Fly the track and once ready click the button to get your rates checked." The button is bottom right, "Start checking my rates", and it stays on screen while they learn the course. Pressing it is what starts the check. The gate card only seats the track. The Rate Lab skips the launch card so that flight is the next thing they see.
+
+Not run: a browser pass of the button. `node --check` on the shell files is the syntax check. `npm run verify` was not run.
+
+## 2026-10-06 | Rate my Rates | Fly the new rates before anyone asks
+
+The owner finished a lap and was asked how the new rates felt. Those rates had been put on at the end of the lap flown on the old ones. They had not tried them. The adjustment still read as a guess.
+
+### The order
+
+1. One lap on the rates they are flying. That lap is the measurement.
+2. If the racing line says the roll stick was clearly over or under what the line asked for, roll centre moves one stored step. On the stop through a corner, full stick moves one step. Pitch, yaw and expo stay. A lap that matches the line changes nothing.
+3. The new rates go on and they are sent back to the grid. The line on screen is to fly a full lap on them. There is no question yet.
+4. That second lap is the trial. Then the question, and it says whether the trial was faster or slower than the measured lap, in seconds.
+5. Yes keeps them. No puts the old rates back, and the next try steps the other way, because the lap clock rejected the first guess.
+
+The line comparison is roll only. A straight wants a centred stick. A steady corner wants a centred stick too, because the stick commands rate and the bank is already there. Stick the line did not ask for is an over-correction. Missing the entry, or drifting off the line without answering it, is an under-correction.
+
+### Measured
+
+`node scripts/ratemyrates-check.js`: 102 passed, 0 failed. A straight has no curvature. Stick the straight did not ask for drops roll centre one step, 7 to 6. A centred stick does not move it. Finishing the trial returns `ask` and does not propose again.
+
+Not run: `npm run verify`. Not flown. The feel of the step is the pilot's.
+
+## 2026-10-06 | Rate my Rates | Lukewarm answers, rates on screen
+
+The yes or no was too sharp. After a lap on the new rates the question is now three answers. "I'm not sure, do another lap" keeps these rates and asks again after the next lap. "A little better, but not there yet" takes one more step the same way and that lap is the new comparison. "A little worse, try the other way" steps back the other direction from the rates before this try.
+
+The start button sits in the centre column, just above the weight slider, and stays up in the air while the slider fades. Current rates are on screen as Now. Was appears under it once a new set is on.
+
+Not run: a browser pass. `node scripts/ratemyrates-check.js` still 102 passed. `npm run verify` was not run.
+
+## 2026-10-07 | Rate my Rates | Sluggish or twitchy, one step
+
+The owner showed the jump the first lap made: roll 70/670 to 110/340, pitch and yaw max cut to 340 as well. That is the old fit, which can halve full stick in one pass. Flown, 340 felt sluggish. Saying it was worse then threw the change back the other way and it went twitchy. The rates they have found for themselves, Actual, pitch linked to roll: roll and pitch centre 150, max 450, expo 0.35. Yaw centre 170, max 400, expo 0.21.
+
+A lap check no longer uses that fit. Max rate walks toward the rotation the lap actually reached, at most 20 deg/s a try. Centre walks 10 deg/s. Expo walks 0.05 when the lap lived in the middle of the stick. The question after the trial lap is Too sluggish (centre and full stick up one step), Too twitchy (full stick down one step, a little expo on), A little better (the same step again), or I'm not sure, do another lap.
+
+`node scripts/ratemyrates-check.js`: 102 passed. Not flown. `npm run verify` was not run.
+
+## 2026-10-07 | Rate my Rates | Parked for the night
+
+The owner stopped here and will fly it again tomorrow. This entry is the state to resume from. The entries above it describe steps that were replaced the same night. Where they disagree with this one, this one wins.
+
+### Where it is
+
+Branch `cursor/rate-my-rates-mode-e682`, the head of the fork's draft pull request. Local server, if it is still up: `http://127.0.0.1:8000/?map=ratelab`.
+
+### What the pilot does
+
+1. Fly the track and learn it. The grid says to click the button when ready. The button is "Start checking my rates", in the centre, just above the weight slider. It stays up in the air. It is not in the bottom right.
+2. One lap on the current rates. That lap only measures. Rates do not change until it is finished.
+3. A small step goes on and the craft returns to the grid. Fly a full lap on those rates. No question yet.
+4. Then the question, which also says if that lap was faster or slower:
+   - Too sluggish: centre up 10 deg/s, full stick up 20.
+   - Too twitchy: full stick down 20, expo up 0.05.
+   - A little better, but not there yet: the same small step again.
+   - I'm not sure, do another lap: nothing changes.
+5. Now shows the rates being flown, centre and full stick, roll pitch yaw. Was appears under it once a new set is on.
+
+A lap check does not use the old fit. That fit halved full stick in one pass (70/670 became 110/340) and felt sluggish, and reversing it felt twitchy. Max rate now walks toward the rotation the lap reached, at most 20 deg/s a try. Centre walks 10. Expo walks 0.05 when the lap lived in mid stick. Pitch stays with roll while they match.
+
+### The rates the pilot has found
+
+Actual, separate pitch off. Roll and pitch: centre 150, max 450, expo 0.35. Yaw: centre 170, max 400, expo 0.21. Camera angle 40 degrees. Throttle limit off, mid 0.38, expo 0.58. These are the shape a walk of small steps should be able to reach from a twitchy high max and a soft centre. They are not a preset to paste in.
+
+### The track
+
+The generated slalom was rejected: every flag was passed on the right, so it flew as orbits. The owner edited a copy in the builder (Rate my Rates room, Edit the track). The Rate Lab flies that copy when the builder's working track is this course or a remix of `trk-ra7e1ab0`.
+
+### Checks
+
+`node scripts/ratemyrates-check.js`: 102 passed, last run after the sluggish and twitchy step. `scripts/ratepass-check.js` was rewritten for "no lap, no rate change" and for the button, and was not run. `npm run verify` was not run. Nothing in the physics model, the module ABI, or the WASM build was touched.

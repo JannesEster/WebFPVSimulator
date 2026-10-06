@@ -180,6 +180,24 @@ const SHOTS = [
      * the train is where it is every time this is regenerated. */
     anim: 14125,
   },
+  {
+    name: 'ratemyrates',
+    args: ['--url=/index.html?map=city'],
+    /*
+     * THE SAME TOWN AS THE FREESTYLE CARD, FROM INSIDE IT, and the contrast
+     * between the two pictures is the point.
+     *
+     * This card flies freestyle, so photographing anywhere else would be
+     * promising a place it does not go. Freestyle's own card is taken from
+     * over the roofs, where the town reads as a town, because that card is
+     * about WHERE you are going. This one is about what your hands are
+     * doing, so the lens is down at head height in the street looking along
+     * it: the same world, framed as somewhere you are flying rather than
+     * somewhere you are choosing.
+     */
+    cam: [6, 2.2, 26, 2, 2.6, -4],
+    anim: 14125,
+  },
 ];
 
 /*

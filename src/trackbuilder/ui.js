@@ -2627,6 +2627,10 @@ export class Panels {
    * The card is dragged by its heading, with a mouse or a finger. One listener on the card, installed once, so
    * every variant of the card gets it and none has to remember to. A press on a button or a field is theirs.
    * The card is kept inside the stage, and its size is untouched, so no layout baseline moves.
+   *
+   * Only by the first finger down. A second finger that lands on the heading is the second finger of a pinch:
+   * from 2026-10-04 the heading took it as a drag and kept it, and the pinch it belonged to never zoomed
+   * (builder-flow-check, "touch": "with the card up, the second finger on it still joins").
    */
   armCardDrag(card) {
     if (card.dataset.dragArmed) {
@@ -2635,7 +2639,8 @@ export class Panels {
     card.dataset.dragArmed = '1';
     card.addEventListener('pointerdown', (e) => {
       const head = e.target.closest ? e.target.closest('.tb-card-head') : null;
-      if (!head || e.target.closest('button, input, select, textarea, a, label') || (e.pointerType === 'mouse' && e.button !== 0)) {
+      if (!head || e.target.closest('button, input, select, textarea, a, label') || (e.pointerType === 'mouse' && e.button !== 0)
+        || !e.isPrimary) {
         return;
       }
       const parent = card.offsetParent;

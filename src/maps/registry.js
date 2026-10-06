@@ -62,6 +62,22 @@ export const MAPS = [
     buildMs: MAP_BUILD_MS.custom,
     load: () => import('./custom.js'),
   },
+  /*
+   * THE RATE LAB. A race track this repository generates, seated by the
+   * Rate my Rates card and by ?map=ratelab. ownCourse: the boot and the
+   * airframe swap must not replace it with the board's most flown track
+   * when the builder's seat is empty. It is not a freestyle world and it
+   * is not the pilot's track.
+   */
+  {
+    id: 'ratelab',
+    name: 'Rate Lab',
+    mode: 'race',
+    ownCourse: true,
+    note: 'A first gate, a slalom, a triple stack up and down, a corkscrew up, then a split-S. The track Rate my Rates measures on.',
+    buildMs: MAP_BUILD_MS.ratelab,
+    load: () => import('./ratelab.js'),
+  },
   {
     id: 'city',
     name: 'The town',

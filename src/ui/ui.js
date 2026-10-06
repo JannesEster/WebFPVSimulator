@@ -86,11 +86,16 @@ import {
   profileForType,
   rateField,
   ratesAreDefault,
+  ratesDiff,
   ratesFromLegacy,
   ratesShort,
   ratesSummary,
   throttleSummary,
 } from '../../configs/rates.js';
+import { angleRateDeg } from '../fc/ratescurve.js';
+import {
+  SESSION_GOOD_S, SESSION_THIN_S, passRowNote, passRowValue, passState,
+} from '../fc/ratemyrates.js';
 import {
   PRESET_NAME_MAX,
   RATES_STORAGE_WARNING,
@@ -137,6 +142,7 @@ import {
   readPostedBest,
   writeBuilderIntent,
   writePendingTime,
+  writeShareImport,
   /* Only clearShareImport. The shell used to WRITE a share seat too, for a
    * track that ships with the simulator; the Track room no longer seats one
    * of those, so what is left is clearing a stale seat out of the way of
@@ -344,6 +350,7 @@ const SCREEN_TITLES = {
   launch: 'Before you fly',
   standings: 'Standings',
   rates: 'Rates',
+  ratemyrates: 'Rate my Rates',
   pids: 'Tune',
   fc: 'Firmware bench',
   paused: 'Paused',
@@ -370,6 +377,7 @@ const CRUMBS = {
   launch: ['Before you fly'],
   standings: ['Tracks', 'Standings'],
   rates: ['Settings', 'Rates'],
+  ratemyrates: ['Rate my Rates'],
   pids: ['Quad', 'Tune'],
   fc: ['Quad', 'Firmware bench'],
   paused: ['Paused'],
@@ -1197,6 +1205,16 @@ const DEFAULTS = {
    * the typeof gate accepts it.
    */
   showFps: false,
+  /*
+   * STICK OVERLAY: the two gimbals at the bottom of the flight picture, a
+   * dot on each following the live sticks. On by default, so a pilot on a
+   * radio or a gamepad sees what the quad is being told, which they did not
+   * before: the overlay used to be the keyboard's alone. Off removes the
+   * gimbals for a clean picture; the Weight slider between them is not this
+   * setting's and stays. Only the picture: it reads the channels the frame
+   * loop already holds. A boolean so the typeof gate accepts it.
+   */
+  stickOverlay: true,
   packVoltage: 4.2,
   /*
    * How heavy the quad is, as a percentage of the weight the airframe is
@@ -1240,6 +1258,11 @@ const DEFAULTS = {
   /* Record the flight for download as a blackbox CSV. Off by default: it
    * holds every frame of the run in memory. */
   flightLog: false,
+  /* Settings > Advanced > Support prompts, and src/share/supportprompt.js
+   * reads it for the builder. Declared here because loadSettings keeps only
+   * a key with a default: the switch went in on 2026-10-05 without one, so
+   * Off was dropped by the next page load and the prompts came back. */
+  supportPrompts: true,
   /* Named preset, not a bag of sliders. 'high' is the authored look and
    * the default on a first run that is not a Steam Deck; see
    * src/render/quality.js. A string so loadSettings' typeof gate accepts
@@ -4210,6 +4233,41 @@ const WAYS = [
      * hidden and these are the whole of the card. */
     facts: ['No gates', 'No clock', 'Build a map'],
   },
+  /*
+   * THE FOURTH WAY IN, WHICH FLIES IN ORDER TO MEASURE.
+   *
+   * It is in WAYS rather than beside them because it IS a way: it seats an
+   * aircraft, it sets a mode, and it lands the pilot in a flight. The only
+   * thing that distinguishes it is that something is watching, which is
+   * what `measure` says, and the one place that matters is seatedWay: the
+   * cursor must never OPEN on this card. A pilot arriving to fly is
+   * arriving to fly, and a tuning utility sitting under the cursor on every
+   * visit would be the front door answering a question nobody asked.
+   *
+   * THE RATE LAB, NOT FREESTYLE. The owner flew the freestyle version and
+   * said tuning rates there gives most people no structure. The fit
+   * compares each pass with the last, so two passes are only comparable
+   * when they were the same kind of flying. The card seats the Rate Lab:
+   * a first gate, a slalom, a triple stack up and down, a corkscrew and a
+   * split-S, and asks the pilot for no drill. They fly the track. That is
+   * also the licence line. Calibration exercise designs are what
+   * WILDTYPE's RateFinder reserves, and a race track made of ordinary
+   * elements is not one. See src/fc/ratemyrates.js and src/maps/ratelab.js.
+   */
+  {
+    id: 'ratemyrates',
+    airframe: '5inch',
+    mode: 'race',
+    map: 'ratelab',
+    /* Not yet. The pilot flies the track and learns it, then the button
+     * on the flight screen starts the check. Arming it here would take
+     * the rates off them before they had seen the course. */
+    measure: false,
+    label: 'Rate my Rates',
+    art: 'assets/gate/ratemyrates.jpg',
+    blurb: 'The Rate Lab: a slalom, a triple stack each way, a corkscrew and a split-S. Fly it and this reads your hands, then moves your rates and puts you back on the grid.',
+    facts: ['Slalom', 'Triple stack', 'Split-S'],
+  },
 ].map((w) => ({ ...w, action: `way-${w.id}` }));
 
 /*
@@ -4241,10 +4299,18 @@ const BUILDER_CARD = {
  * on and what a menu that has been backed out of returns to. The mode is
  * only set once the gate has been answered, so before that the racing card
  * of the seated aircraft is the standing answer. */
+/* The ways a pilot can be SEATED on, which is every way that is not a
+ * measuring one: see the `measure` note in WAYS for why the cursor must
+ * never open on that card. */
+function flyableWays() {
+  return WAYS.filter((w) => !w.measure);
+}
+
 function seatedWay(settings, mode) {
-  return WAYS.find((w) => w.airframe === settings.airframe && w.mode === (mode || 'race'))
-    || WAYS.find((w) => w.airframe === settings.airframe)
-    || WAYS[0];
+  const ways = flyableWays();
+  return ways.find((w) => w.airframe === settings.airframe && w.mode === (mode || 'race'))
+    || ways.find((w) => w.airframe === settings.airframe)
+    || ways[0];
 }
 
 /*
@@ -4327,6 +4393,15 @@ export class Ui {
      * what onGate() says, so a link has to answer both to skip it.
      */
     this.mode = linkedMode();
+    /*
+     * Whether this session is being measured for a rate proposal: see the
+     * Rate my Rates card in WAYS and the room of the same name. Off until
+     * that card is pressed, and off again the moment another one is.
+     */
+    this.measuring = false;
+    /* What main.js has measured so far, as a function, for the same reason
+     * the stick path is one: see setStickProbe. */
+    this.rateProbe = null;
     /*
      * WHICH AIRCRAFT, the other half.
      *
@@ -5421,6 +5496,50 @@ export class Ui {
     this.screens.rates = rates;
 
     /*
+     * RATE MY RATES: what the session measured, and what it asks for.
+     *
+     * WHY IT IS ITS OWN SCREEN AND NOT A SECTION OF THE ONE ABOVE. Rates is
+     * a room where every row writes to the quad. Every row here is a
+     * MEASUREMENT, and nothing in it is editable: a reading a pilot could
+     * type over would not be a reading. Putting the two in one room would
+     * put editable and read-only rows in one list, and the pilot's only clue
+     * about which was which would be that some of them refuse the arrows.
+     *
+     * It wears screen-pilot's plain page styling rather than Rates' own,
+     * because Rates' layout exists to seat the curve panel in its first
+     * column and this room has no panel. The curve belongs on the screen
+     * where the numbers can be changed, which is where Take these rates
+     * hands over to.
+     *
+     * NO HOST, NO ROWS, and that is why this block exists at all. The first
+     * version of this feature added the screen id, its title, its crumb, its
+     * rows and its actions, and skipped this: renderMenu looks the screen up
+     * in a map of DOM hosts, found nothing, and drew the room's crumb and
+     * its command bar over an empty page. Everything worked except that the
+     * room was blank. A screen is four things and this is the fourth.
+     */
+    const rmr = el('div', 'screen screen-page screen-pilot screen-ratemyrates');
+    rmr.append(el('h2', null, SCREEN_TITLES.ratemyrates));
+    rmr.append(el(
+      'p',
+      'rates-lede',
+      /*
+       * THIS LINE USED TO SAY "nothing here changes the quad until you take
+       * it", which was true of the one shot version and became a lie the
+       * moment the loop applied its own passes. A screen that misdescribes
+       * what it is doing to the quad is worse than a screen that says
+       * nothing, so it says what actually happens and where the undo is.
+       */
+      'It refines your rates as you fly, a pass at a time. You can put back what you arrived on.',
+    ));
+    const rmrBlock = wrapMenu();
+    this.rateMyRatesMenu = rmrBlock.menu;
+    this.rateMyRatesMenu.classList.add('menu-scroll');
+    this.rateMyRatesHelp = rmrBlock.help;
+    rmr.append(rmrBlock.stage);
+    this.screens.ratemyrates = rmr;
+
+    /*
      * PIDs.
      *
      * THE HALF OF THE FLIGHT-CONTROLLER SCREEN THAT WAS MISSED. Removing
@@ -5782,6 +5901,25 @@ export class Ui {
       this.act('pause');
       this.show('paused');
     });
+
+    /*
+     * START CHECKING MY RATES, just above the weight slider.
+     *
+     * The track is flown first, with nothing watching. This is the press
+     * that starts the check, once the pilot knows the course. It is not on
+     * the gate card: that card only seats the track.
+     */
+    this.rateCheck = btn('bug-chip rate-check', 'Start checking my rates');
+    this.rateCheck.addEventListener('click', () => this.startRateCheck());
+    /* Above the weight slider, in the centre, not in a corner. */
+    this.osdRates = el('div', 'osd-rates');
+    this.osdRatesNow = el('div', 'osd-rates-now', '');
+    this.osdRatesWas = el('div', 'osd-rates-was', '');
+    this.osdRatesWas.hidden = true;
+    this.osdRates.append(this.osdRatesNow, this.osdRatesWas);
+    const airRow = this.osdAir.range.parentElement;
+    this.osdAir.box.insertBefore(this.osdRates, airRow);
+    this.osdAir.box.insertBefore(this.rateCheck, airRow);
 
     this.musicDock = el('div', 'music-dock');
     this.musicDock.setAttribute('role', 'group');
@@ -6382,6 +6520,15 @@ export class Ui {
       this.pauseChip.hidden = dialog || this.screen !== 'flight';
       this.pauseChip.classList.toggle('on-flight', this.screen === 'flight');
     }
+    /* Up while a race is being flown and the check has not started. A
+     * finished check (they kept the rates) shows it again, so they can
+     * run another. Freestyle has no lap to check. */
+    if (this.rateCheck) {
+      const read = this.rateProbe ? this.rateProbe() : null;
+      const checking = this.measuring && (!read || read.state !== 'done');
+      const race = this.mode === 'race';
+      this.rateCheck.hidden = dialog || !race || this.screen !== 'flight' || checking;
+    }
     /* The dock takes the second slot when there is a chip in the first and
      * the corner when there is not, which is the title. Written as a class
      * rather than as a top in pixels here, so the status bar's own offset
@@ -6971,6 +7118,127 @@ export class Ui {
     }, 1400);
   }
 
+  /*
+   * The same dialog, asked by a rate pass rather than by a finished race.
+   * It does not set feelAsked. That flag is the one automatic offer a
+   * pilot ever gets, on the second results screen, and a tuning run that
+   * spent it would take the offer away from somebody who has not had it.
+   * Returns false when another dialog is already up, so the caller can
+   * wait rather than closing whatever the pilot is reading.
+   */
+  /*
+   * After a Rate Lab lap the new rates are already on the quad. This asks
+   * whether to keep them. It is not the flight-feel report: that one asks
+   * how the quad flew and files a ticket, and a pilot who answered it
+   * found that nothing about their rates changed. Two answers, and both
+   * do something.
+   *
+   *   sluggish  centre and full stick up one small step
+   *   twitchy   full stick down one small step, a little expo on
+   *   better    the same small step again
+   *   again     same rates, another lap
+   */
+  askRateVerdict(times) {
+    if (this.nameWait) {
+      this.closeNameDialog(null);
+    }
+    const box = el('div', 'name-dialog-box');
+    box.append(el('h2', null, 'How are your new rates?'));
+    let lede = 'You have just flown a lap on the new rates. How did they feel?';
+    const measureMs = times && times.measureMs;
+    const trialMs = times && times.trialMs;
+    if (measureMs > 0 && trialMs > 0) {
+      const delta = (trialMs - measureMs) / 1000;
+      if (delta < -0.05) {
+        lede = `That lap was ${(-delta).toFixed(1)} seconds faster than the lap on your old rates. How are your new rates?`;
+      } else if (delta > 0.05) {
+        lede = `That lap was ${delta.toFixed(1)} seconds slower than the lap on your old rates. How are your new rates?`;
+      } else {
+        lede = 'That lap was about the same speed as the one on your old rates. How are your new rates?';
+      }
+    }
+    box.append(el('p', 'lede', lede));
+    const row = el('div', 'name-dialog-row rate-choices');
+    const sluggish = btn('name-dialog-btn', 'Too sluggish');
+    const twitchy = btn('name-dialog-btn', 'Too twitchy');
+    const better = btn('name-dialog-btn on', 'A little better, but not there yet');
+    const again = btn('name-dialog-btn', 'I\'m not sure, do another lap');
+    row.append(sluggish, twitchy, better, again);
+    box.append(row);
+    this.nameDialog.textContent = '';
+    this.nameDialog.append(box);
+    this.nameDialog.hidden = false;
+    this.syncChips();
+    return new Promise((resolve) => {
+      this.nameWait = resolve;
+      const finish = (value) => {
+        this.closeNameDialog(value);
+      };
+      sluggish.addEventListener('click', () => finish('sluggish'));
+      twitchy.addEventListener('click', () => finish('twitchy'));
+      better.addEventListener('click', () => finish('better'));
+      again.addEventListener('click', () => finish('again'));
+      const onKey = (e) => {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+      };
+      this.nameKeyHandler = onKey;
+      this.nameDialog.addEventListener('keydown', onKey, true);
+    });
+  }
+
+  /*
+   * The Rate Lab, opened in the builder as a copy. The canvas it replaces
+   * is kept in Load. The pilot edits the slalom there; the next time the
+   * Rate Lab map builds, it flies that copy.
+   */
+  /*
+   * The bottom-right button. Arms the check on the rates they are flying
+   * now, without putting them back on the grid: they asked for it because
+   * they already know the track. If a check is still marked on from a run
+   * that finished, it is dropped and started again so the coach sees the
+   * edge and begins a new pass.
+   */
+  startRateCheck() {
+    if (this.measuring) {
+      this.measuring = false;
+      saveSettings(this.settings);
+      if (this.onSettings) {
+        this.onSettings(this.settings);
+      }
+    }
+    this.mode = 'race';
+    this.measuring = true;
+    saveSettings(this.settings);
+    if (this.onSettings) {
+      this.onSettings(this.settings);
+    }
+    this.syncChips();
+    if (this.screen !== 'flight' && this.onAction) {
+      this.act('fly');
+    }
+  }
+
+  async openRateLabInBuilder() {
+    const url = new URL('../../tracks/json/ratelab.json', import.meta.url);
+    const res = await fetch(url);
+    if (!res.ok) {
+      return;
+    }
+    const doc = await res.json();
+    writeShareImport({
+      id: doc.id,
+      name: doc.name || 'Rate Lab',
+      document: doc,
+      stock: true,
+      author: '',
+    });
+    writeBuilderIntent({ kind: 'remix' });
+    window.location.href = 'src/trackbuilder/index.html?mode=race';
+  }
+
   openFeelReport() {
     if (this.bugFiling || (this.nameDialog && !this.nameDialog.hidden)) {
       return;
@@ -7020,7 +7288,7 @@ export class Ui {
     box.append(el(
       'p',
       'lede',
-      `One honest word steers the tune work more than any telemetry. Only the first row is needed; your tune, PID adjustment and rates travel with the answer so the numbers behind the feel arrive too. You were flying ${context.tuneName}.`,
+      `One honest word steers the tune work more than any telemetry. Only the first row is needed; your tune, PID adjustment and rates travel with the answer so the numbers behind the feel arrive too. You were flying ${context.tuneName}.${context.line ? ` ${context.line}` : ''}`,
     ));
 
     let feel = null;
@@ -7402,6 +7670,7 @@ export class Ui {
       /* A map from the board is flown in the built world, and the row names
        * that map and its builder rather than calling it Your map. */
       const shared = world && world.id === 'built' ? this.sharedMap : null;
+      const own = m.ownCourse ? m : null;
       const modeRow = this.mode === 'freestyle'
         ? {
           label: 'Map',
@@ -7422,14 +7691,21 @@ export class Ui {
               ? `${world.note} Your quad and the physics model are in here.`
               : townNote(s, this.loadFailure)),
         }
-        : {
-          label: 'Track',
-          value: seat ? seat.name : 'Choose one',
-          action: 'courses',
-          note: seat
-            ? `${seat.name}, and every other track. Gated, against the clock, and a lap flown here can go on the board.`
-            : 'No track is seated yet. Your own tracks, every track the board is offering, and the builder, are in here.',
-        };
+        : (own
+          ? {
+            label: 'Track',
+            value: own.name,
+            action: 'courses',
+            note: own.note,
+          }
+          : {
+            label: 'Track',
+            value: seat ? seat.name : 'Choose one',
+            action: 'courses',
+            note: seat
+              ? `${seat.name}, and every other track. Gated, against the clock, and a lap flown here can go on the board.`
+              : 'No track is seated yet. Your own tracks, every track the board is offering, and the builder, are in here.',
+          });
       /*
        * THREE ROOMS AND A VERB, in place of twelve typographic equals.
        *
@@ -7491,10 +7767,50 @@ export class Ui {
               : 'Before you fly first: the laps, the pack and what this run counts as, then the grid. Once per track each visit.')
             : undefined,
         };
+      /*
+       * THE WAY BACK INTO THE MEASUREMENT, and it is only here while there
+       * is one.
+       *
+       * A pilot who pressed Rate my Rates, flew, and hit Escape lands on
+       * this screen, and the result of what they just did has to be ON it.
+       * Without this row the room would be reachable only by pressing the
+       * card again, which starts a fresh session and throws the flight away:
+       * the one gesture that looks like "show me the answer" would be the
+       * one that destroys it.
+       *
+       * Off the list when nothing is being measured, because a row that
+       * opens a room saying "nothing measured yet" is furniture. The card on
+       * the gate is the way in from cold.
+       */
+      /*
+       * ON THE LIST WHILE A RUN IS LIVE, AND WHILE ONE HAS LEFT A MARK.
+       *
+       * The second half is a trap being closed rather than a nicety. The row
+       * used to appear only while `measuring`, which goes false the instant
+       * any other card on the gate is pressed. So: run the loop, let it move
+       * your rates across three passes, then press Freestyle because you
+       * want to go flying. The row vanishes, and with it the only door to
+       * the room, and the only way back to the profile you arrived on. The
+       * pilot is left on rates they did not choose with no way to undo them.
+       *
+       * So it also shows while the run has passes behind it, whether or not
+       * the mode is still armed, because the undo has to outlive the mode.
+       */
+      const measured = this.rateProbe ? this.rateProbe() : null;
+      const ranSomething = Boolean(measured && measured.passes && measured.passes.length);
+      const rateRow = (this.measuring || ranSomething)
+        ? [{
+          label: SCREEN_TITLES.ratemyrates,
+          value: passRowValue(measured, this.measuring),
+          action: 'ratemyrates',
+          note: passRowNote(measured, this.measuring),
+        }]
+        : [];
       return [
         ...(trouble ? [trouble] : []),
         flyRow,
         modeRow,
+        ...rateRow,
         /*
          * THE TRICK LIST IS WITHDRAWN UNTIL THE SCORING IS SETTLED.
          *
@@ -8330,6 +8646,14 @@ export class Ui {
           s.showFps,
           (v) => { s.showFps = v; },
         ),
+        toggle(
+          'Stick overlay',
+          s.stickOverlay
+            ? 'On: two small boxes at the bottom of the flight picture, a dot in each following your sticks, laid out by your Stick mode. Drawn for a radio, a gamepad and the keys; hidden while you fly on the thumb sticks, which are already on screen.'
+            : 'Off: no stick boxes on the flight picture. Turn it on to see what your sticks are telling the quad.',
+          s.stickOverlay,
+          (v) => { s.stickOverlay = v; },
+        ),
         { label: 'Sound', section: true },
         toggle('Sound', 'All sound: motors, wind, music, cues and every lap time called out loud.', s.sound, (v) => { s.sound = v; }),
         stepper('Volume', 'Overall level, the lap call included. Zero to ten.', `${s.volume}`, (d) => {
@@ -8512,7 +8836,7 @@ export class Ui {
     if (this.screen === 'launch') {
       const seat = activeCourseSummary();
       const m = MAPS.find((x) => x.id === s.map) ?? MAPS[0];
-      const trackName = seat && seat.name ? seat.name : m.name;
+      const trackName = m.ownCourse ? m.name : (seat && seat.name ? seat.name : m.name);
       return [
         {
           label: 'Track',
@@ -8810,6 +9134,211 @@ export class Ui {
         }] : []),
         feelItem(),
         { label: 'Back to title', action: 'title' },
+      ];
+    }
+    /*
+     * THE RATE MY RATES ROOM: what the session measured, what it proposes,
+     * and one row to fly it.
+     *
+     * READ ONLY ROWS AND TWO VERBS, which is the shape this room has to
+     * have. Every number here is a measurement, so none of it is editable:
+     * a row a pilot could type into would be a measurement they had
+     * overwritten. What they CAN do is take the proposal, which hands them
+     * straight to the Rates screen's rows, where every number is editable
+     * and the curve is drawn. So this room measures and argues, and the
+     * room that already owns rate profiles is the one that holds them.
+     *
+     * NOTHING IS APPLIED WITHOUT BEING ASKED. A mode that silently changed
+     * the quad under a pilot would be the single worst thing this feature
+     * could do, so the proposal sits here until Take these rates is pressed
+     * and the quad is flying whatever it was flying until then.
+     */
+    if (this.screen === 'ratemyrates') {
+      const read = this.rateProbe ? this.rateProbe() : null;
+      const back = { label: 'Back', action: 'back' };
+      /* ONE DEFINITION OF WHAT STATE THE RUN IS IN, in src/fc/ratemyrates.js,
+       * shared with the title row and unit tested there. The room used to
+       * work it out again from `read.state` and `read.armed`, and the two
+       * copies disagreed: see the `left` state in that file. */
+      const state = passState(read, read ? read.armed : false);
+      if (state === 'cold') {
+        return [
+          {
+            label: 'Nothing measured yet',
+            value: '',
+            info: true,
+            note: 'This room reads a Rate my Rates session. Press Rate my Rates on the front screen, '
+              + 'fly one lap, and then say whether the new rates are any good.',
+          },
+          {
+            label: 'Start a session',
+            action: 'ratemyrates-start',
+            primary: true,
+            note: 'Seats the five inch on the Rate Lab and starts watching. Fly one lap. Rates stay as they are until that lap is finished.',
+          },
+          {
+            label: 'Edit the track',
+            action: 'ratelab-edit',
+            note: 'Opens this track in the builder so you can fix the course. The track already on the canvas is kept in Load.',
+          },
+          back,
+        ];
+      }
+      const done = state === 'done';
+      /*
+       * THE PASS TABLE, which is the whole story of the run in one column.
+       *
+       * A pilot who is handed a final profile and nothing else has no way to
+       * tell a loop that converged from a loop that gave up, and those two
+       * want opposite things from them. So every pass is a row: what it set,
+       * how much it moved, and whether its proposal was refused for drifting
+       * too far from where they started.
+       */
+      const passRows = read.passes.map((p) => ({
+        label: `Pass ${p.pass}`,
+        value: ratesShort(p.rates).replace(/^Actual /, ''),
+        info: true,
+        note: p.refused
+          ? `This pass wanted ${ratesShort(p.wanted)} and was refused: one run may not drag your `
+            + 'profile that far from where it started. You kept the pass before it. Fly these and '
+            + 'start again, and the next run measures from here and goes further.'
+          : `${p.moveSeconds.toFixed(0)} seconds of stick movement, and it moved your profile by `
+            + `${Math.round(p.moved.frac * 100)} percent.${p.settled ? ' This is where it stopped moving.' : ''}`,
+      }));
+
+      /*
+       * WHAT IS HAPPENING RIGHT NOW. Either a pass in progress, with how far
+       * through it is and where it is currently heading, or the verdict.
+       *
+       * The live reading is labelled as incomplete rather than hidden. A
+       * screen that said nothing until a pass filled would leave a pilot who
+       * had just flown twenty seconds looking at a stale number with no sign
+       * that anything was being measured at all.
+       */
+      const live = read.live;
+      /*
+       * A RUN THAT WAS WALKED AWAY FROM is neither finished nor in
+       * progress, and saying either would be wrong. The pilot pressed
+       * another card on the gate, so nothing is being measured, but the
+       * passes that already landed are still on their quad and the undo is
+       * still the thing they are most likely here for.
+       */
+      const left = state === 'left';
+      const headRow = left
+        ? {
+          label: 'Run left unfinished',
+          value: `${read.passes.length} pass${read.passes.length === 1 ? '' : 'es'}`,
+          info: true,
+          note: 'You left the mode, so nothing is being measured now. What the passes below set is '
+            + 'still what you are flying. Start a session to carry on from here, or put back what '
+            + 'you arrived on.',
+        }
+        : (done
+          ? {
+          label: read.why === 'settled' ? 'Settled' : 'Stopped',
+          value: ratesShort(read.rates),
+          info: true,
+          note: read.why === 'settled'
+            ? `It stopped moving after ${read.passes.length} passes, which means these rates fit how `
+              + 'you fly. Fly them. If they feel wrong somewhere specific, the Rates screen has every '
+              + 'number and the curve.'
+            : (read.why === 'drift'
+              ? 'It wanted to move your profile further from where you started than one run is '
+                + 'allowed to, so it stopped and kept the last profile inside that limit. That '
+                + 'usually means you are asking for a lot more rate than you had. Fly these, then '
+                + 'run it again: the next run measures from here.'
+              : `It used all ${read.passLimit} passes and was still moving, so it stopped rather than `
+                + 'guessing. Fly these and run it again to carry on from here.'),
+        }
+        : {
+          label: `Pass ${read.pass} of up to ${read.passLimit}`,
+          value: `${Math.round(read.passProgress * 100)}%`,
+          info: true,
+          note: read.moveSeconds > 0
+            ? `${read.moveSeconds.toFixed(0)} seconds of stick movement so far. A pass fills on stick `
+              + 'movement rather than on the clock, so time parked on the ground costs you nothing. '
+              + 'When it fills, your rates change and the next pass measures those.'
+            : 'Watching, and nothing measured yet. Fly: hover and hold a line, then commit to some '
+              + 'real moves. A pass fills on stick movement, so parked time costs you nothing.',
+        });
+
+      const axisRow = (axis, label, from) => ({
+        label,
+        value: `${Math.round(angleRateDeg('ACTUAL', {
+          rcRate: from[axis].rcRate,
+          srate: from[axis].srate,
+          expo: from[axis].expo,
+          quickRcExpo: false,
+        }, 1))} deg/s`,
+        info: true,
+        note: (live ? live.notes : null)?.[axis] ?? 'Measured on the passes above.',
+      });
+      const shown = live ? live.rates : read.rates;
+
+      return [
+        headRow,
+        {
+          label: 'Flying now',
+          value: ratesShort(s.rates),
+          info: true,
+          note: `You arrived on ${ratesShort(read.opening)}.`
+            + (ratesDiff(read.opening) === ratesDiff(s.rates)
+              ? ' Nothing has changed yet.'
+              : ` This run has moved you by ${Math.round(read.drift.frac * 100)} percent, and the row `
+                + 'below puts you back if you want it.'),
+        },
+        ...(read.passes.length ? [{ label: 'Every pass', section: true }, ...passRows] : []),
+        ...(live && !done && !left
+          ? [
+            {
+              label: 'Pass so far', section: true,
+            },
+            {
+              label: 'Heading toward',
+              value: ratesShort(live.rates),
+              info: true,
+              note: 'An incomplete pass, so this is not the answer yet: it is what this pass would '
+                + `set if it ended now, ${Math.round(live.moved.frac * 100)} percent from what you are `
+                + 'flying. Keep flying and it settles.',
+            },
+            axisRow('roll', 'Roll', shown),
+            axisRow('pitch', 'Pitch', shown),
+            axisRow('yaw', 'Yaw', shown),
+          ]
+          : []),
+        { label: 'Then what', section: true },
+        /* Offered when the run is over AND when it was walked away from,
+         * because the head row in that state tells the pilot to start one
+         * and an instruction with no row under it is worse than silence. */
+        ...(done || left
+          ? [{
+            label: left ? 'Start a session' : 'Run it again',
+            action: 'ratemyrates-start',
+            primary: true,
+            note: left
+              ? 'Puts you back on the Rate Lab and starts a fresh run from what you are flying '
+                + 'now, which is where the passes above left you.'
+              : 'Starts a fresh run from what you are flying now. Worth doing if this one stopped '
+                + 'rather than settled, and worth doing again in a month: your hands change.',
+          }]
+          : []),
+        {
+          label: 'Put my old rates back',
+          action: 'ratemyrates-restore',
+          disabled: ratesDiff(read.opening) === ratesDiff(s.rates),
+          rowClass: ratesDiff(read.opening) === ratesDiff(s.rates) ? 'row-grey' : undefined,
+          note: ratesDiff(read.opening) === ratesDiff(s.rates)
+            ? `Nothing to put back: you are flying ${ratesShort(read.opening)}, which is what you `
+              + 'arrived on.'
+            : `Back to ${ratesShort(read.opening)}, the profile you arrived on, and this run is `
+              + 'forgotten. Nothing about a measured run is permanent until you decide it is.',
+        },
+        {
+          label: 'Edit the track',
+          action: 'ratelab-edit',
+          note: 'Opens this track in the builder so you can fix the course. The track already on the canvas is kept in Load.',
+        },
+        back,
       ];
     }
     if (this.screen === 'rates') {
@@ -9238,6 +9767,7 @@ export class Ui {
       launch: this.launchMenu,
       standings: this.standingsMenu,
       rates: this.ratesMenu,
+      ratemyrates: this.rateMyRatesMenu,
       pids: this.pidsMenu,
       fc: this.fcMenu,
       paused: this.pausedMenu,
@@ -9654,6 +10184,7 @@ export class Ui {
       launch: this.launchHelp,
       standings: this.standingsHelp,
       rates: this.ratesHelp,
+      ratemyrates: this.rateMyRatesHelp,
       pids: this.pidsHelp,
       fc: this.fcHelp,
       paused: this.pausedHelp,
@@ -13393,7 +13924,10 @@ export class Ui {
       try {
         const listing = inspectCourse();
         this.resultsDocId = listing && listing.doc ? listing.doc.id : null;
-        if (listing && listing.canPostTime && listing.shareId) {
+        /* Only a lap on the seated track. The Rate Lab, and any other map
+         * that is not the builder's course, must not file its time against
+         * whatever document happens to be in the seat. */
+        if (this.settings.map === 'custom' && listing && listing.canPostTime && listing.shareId) {
           writePendingTime({
             trackId: listing.shareId,
             lapMs: this.resultsBoard.lapMs,
@@ -14631,10 +15165,13 @@ export class Ui {
   }
 
   /*
-   * Keyboard stick ghost. Mode 2: left is yaw (x) and throttle (y, idle
-   * at the bottom), right is roll (x) and pitch (y, stick forward is up,
-   * matching the radio and the up arrow). Hidden when a radio is the
-   * stick source.
+   * The stick overlay, which began as the keyboard's stick ghost. Mode 2:
+   * left is yaw (x) and throttle (y, idle at the bottom), right is roll (x)
+   * and pitch (y, stick forward is up, matching the radio and the up arrow).
+   * Drawn for every stick source while the Stick overlay setting is on,
+   * which it is by default; it was the keyboard's alone until 2026-10-06.
+   * Hidden on thumb sticks. The shell decides `show` in stickOverlayUp in
+   * main.js, the one test the gate mark's bottom margin reads too.
    *
    * `show` now hides the two GIMBALS rather than the block they sit in,
    * because the air slider sits between them and is not the keyboard's.
@@ -14762,6 +15299,30 @@ export class Ui {
    * after some air, sitting still with the slider under it and a thumb
    * free, and it retires, remembered, on the next takeoff.
    */
+  setRateReadout(now, was) {
+    if (!this.osdRates) {
+      return;
+    }
+    const show = this.screen === 'flight' && this.mode === 'race' && Boolean(now);
+    this.osdRates.hidden = !show;
+    if (!show) {
+      return;
+    }
+    /* Centre and full stick, deg/s, the two columns a step actually moves.
+     * The one-line summary is full stick only, so a centre step would not
+     * show up in it. */
+    const line = (r) => {
+      const p = normaliseRates(r);
+      const bit = (axis) => `${p[axis].rcRate * 10}/${p[axis].srate * 10}`;
+      return `R ${bit('roll')}  P ${bit('pitch')}  Y ${bit('yaw')}`;
+    };
+    this.osdRatesNow.textContent = `Now  ${line(now)}`;
+    this.osdRatesWas.hidden = !was;
+    if (was) {
+      this.osdRatesWas.textContent = `Was  ${line(was)}`;
+    }
+  }
+
   setAirSlider(show, ready = true, { airMs = 0, padFlying = false, touch = false } = {}) {
     const air = this.osdAir;
     if (!air) {
@@ -15243,6 +15804,23 @@ export class Ui {
    * latencyItem. A function for the same reason the stick probe is one. */
   setLatencyProbe(fn) {
     this.latencyProbe = typeof fn === 'function' ? fn : null;
+  }
+
+  /*
+   * WHAT THE SESSION HAS MEASURED, read when the room is opened.
+   *
+   * A function rather than a value, and for a stronger reason than the
+   * stick path's: this one changes on every frame the pilot flies. A
+   * snapshot handed over at any particular moment would be the session as
+   * it was then, and the room exists to be opened after a flight. main.js
+   * owns the accumulator because main.js owns the frame loop; this is how
+   * the room asks it what it has.
+   *
+   * The probe answers { seconds, moveSeconds, stats, fit } or null when
+   * nothing has been measured.
+   */
+  setRateProbe(fn) {
+    this.rateProbe = typeof fn === 'function' ? fn : null;
   }
 
   /*
@@ -16188,6 +16766,12 @@ export class Ui {
       return Boolean(seatedFreestyleMap(this.settings));
     }
     if (this.mode === 'race') {
+      const seated = MAPS.find((x) => x.id === this.settings.map);
+      /* The Rate Lab carries its own course. It is a race without a track
+       * in the builder's seat, and Fly has to launch it. */
+      if (seated && seated.ownCourse) {
+        return true;
+      }
       return this.settings.map === 'custom' && hasLoadedTrack();
     }
     return true;
@@ -16670,6 +17254,15 @@ export class Ui {
       this.settings.airframeAsked = true;
       this.craftGate = false;
       this.mode = way.mode;
+      /*
+       * WHETHER SOMETHING IS WATCHING THIS SESSION, set by every way rather
+       * than only by the one that turns it on, so choosing any other card
+       * turns it off. Not in the settings blob and deliberately not
+       * remembered, for the same reason `mode` is not: it is what this
+       * session is for. src/main.js watches it and resets its accumulator on
+       * the edge, so pressing the card is what starts a fresh measurement.
+       */
+      this.measuring = Boolean(way.measure);
       saveSettings(this.settings);
       /* The shell has to hear this before anything is flown: it is the
        * call that swaps the plant in the compiled module and reloads the
@@ -16679,7 +17272,16 @@ export class Ui {
       }
       this.returnTo = 'title';
       this.roomFrom = null;
-      if (way.mode === 'race') {
+      /* A way that names its map seats that map. The Rate Lab is not the
+       * builder's track and not a freestyle world, so neither branch below
+       * would put the pilot on it. */
+      if (way.map && this.settings.map !== way.map) {
+        this.seatMap(way.map);
+        return;
+      }
+      if (way.map) {
+        /* Already on it. Fall through to the menu behind the gate. */
+      } else if (way.mode === 'race') {
         if (!hasLoadedTrack()) {
           this.show('courses');
           return;
@@ -16823,7 +17425,10 @@ export class Ui {
       this.show(this.mode === 'freestyle' ? 'freestyle' : 'courses');
       return;
     }
-    if (action === 'fly' && seatIsRace(this.settings)) {
+    /* A measured run launches like freestyle: straight into the air. The
+     * launch card is for a lap that can go on the board, and this run is
+     * a tuning pass. ratepass-check presses Fly and expects the sim. */
+    if (action === 'fly' && seatIsRace(this.settings) && !this.measuring && this.settings.map !== 'ratelab') {
       this.returnTo = this.screen === 'paused' ? 'paused' : 'title';
       /* The card once per track per visit: see launchCardSeen. */
       if (launchCardSeen(this.settings)) {
@@ -16841,6 +17446,51 @@ export class Ui {
       if (this.onAction) {
         this.onAction('fly', this.settings);
       }
+      return;
+    }
+    if (action === 'ratemyrates') {
+      this.returnTo = this.screen === 'paused' ? 'paused' : 'title';
+      this.show('ratemyrates');
+      return;
+    }
+    /*
+     * START, OR START AGAIN. Both go through the card's own action, so there
+     * is exactly one piece of code that decides what a Rate my Rates session
+     * is: the aircraft it seats, the mode it sets, and the flag main.js
+     * watches. A second copy here would be the two drifting apart.
+     */
+    if (action === 'ratemyrates-start') {
+      this.act('way-ratemyrates');
+      return;
+    }
+    if (action === 'ratelab-edit') {
+      this.openRateLabInBuilder();
+      return;
+    }
+    /*
+     * PUT BACK THE PROFILE THE PILOT ARRIVED ON.
+     *
+     * The loop applies each pass itself, which is what makes it a loop, so
+     * the thing the pilot needs is not a Take button but an undo. Nothing
+     * about a measured run is permanent until they decide it is, and this is
+     * where they decide it was not.
+     *
+     * The coach keeps the opening profile for the whole run, so this is the
+     * profile they arrived on and not the previous pass's. Halfway back is
+     * not a place anybody asked to be.
+     */
+    if (action === 'ratemyrates-restore') {
+      const read = this.rateProbe ? this.rateProbe() : null;
+      if (!read || !read.opening) {
+        return;
+      }
+      this.settings.rates = normaliseRates(read.opening);
+      this.settings.ratesSplitPitch = !pitchMatchesRoll(this.settings.rates);
+      saveSettings(this.settings);
+      if (this.onSettings) {
+        this.onSettings(this.settings);
+      }
+      this.renderMenu();
       return;
     }
     if (action === 'rates') {

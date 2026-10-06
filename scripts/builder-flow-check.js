@@ -1727,6 +1727,15 @@ kase('touch', async () => {
     check('with the card up, the second finger on it still joins: the pair zooms', !cardBox.hidden && spread.r < hand.r * 0.95, `${hand.r} then ${spread.r}`);
     check('and the card, which it landed on, was not pressed', (await undoCount(page)) === stepsCard);
     check('and lifting the pair did not let go of what was selected', await page.evaluate(`window.trackBuilder.selection.has('${cardGate.id}')`));
+    /* And the first finger on the card's heading is the one that drags it (armCardDrag), toward the middle of
+     * the stage so the edge does not stop it. No check had dragged it before 5 October. */
+    const head = await json(page, "(() => { const h = document.querySelector('#tb-card .tb-card-head strong') || document.querySelector('#tb-card .tb-card-head'); const r = h.getBoundingClientRect(); const c = document.getElementById('tb-card').getBoundingClientRect(); return { x: r.left + Math.min(16, r.width / 2), y: r.top + r.height / 2, left: c.left, top: c.top, mx: c.left + c.width / 2 < innerWidth / 2 ? 40 : -40, my: c.top + c.height / 2 < innerHeight / 2 ? 30 : -30 }; })()");
+    const roomBefore = await orbit();
+    await swipe(page, head, { x: head.x + head.mx, y: head.y + head.my });
+    const cardNow = await json(page, "(() => { const c = document.getElementById('tb-card').getBoundingClientRect(); return { left: c.left, top: c.top }; })()");
+    check('one finger on the card\'s heading drags the card, and leaves the room alone',
+      Math.hypot(cardNow.left - head.left - head.mx, cardNow.top - head.top - head.my) < 4 && same(roomBefore, await orbit()),
+      JSON.stringify([head, cardNow]));
     await page.evaluate('window.trackBuilder.setSelection([]), 1');
     await page.sleep(200);
 

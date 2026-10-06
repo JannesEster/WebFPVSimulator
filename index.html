@@ -2720,8 +2720,12 @@
       /* ---- SUPPORT PROMPT ----------------------------------------------
          Soft support prompt shown at good moments (new PB, 20 min session,
          map publish). Dismissible, at most once a week. ------------------- */
+      /* On the body, never in a screen: a screen is pointer-events none and
+         its children inherit it, which made every button on the prompt a
+         hole to the page behind (src/share/supportprompt.js). The builder's
+         page carries a copy of these rules for its own prompt. */
       .support-prompt {
-        position: fixed; z-index: 1000;
+        position: fixed; z-index: 1000; pointer-events: auto;
         top: 50%; left: 50%;
         transform: translate(-50%, -50%);
         max-width: 420px; width: calc(100% - 40px);
@@ -4936,6 +4940,30 @@
       .screen-credits .menu-stage {
         margin: 6px auto 18px;
       }
+      /* SIX ROWS ON A PHONE ON ITS SIDE, here too. About has six rows since
+         the battery row came (1415c94), and at 844 by 390 the list ran 30 px
+         under the command bar, Back half under it on arrival (lint:shell's
+         fold). The rows keep their 44 px targets and the title keeps its
+         size; what gives is the air around them: the page's top margin, the
+         rule under the title (Paused has none either, and squeezed it sat on
+         the panel's edge), the gap to the panel and the panel's own padding,
+         38 px in all. The owner's choice of 2026-10-06, "Make it fit", over
+         a budget that let the list hang. */
+      @media (max-height: 520px) {
+        .screen-credits { padding-top: 14px; }
+        .screen-credits h2::after { display: none; }
+        .screen-credits .menu-stage { margin-top: 0; }
+        .screen-credits .menu { padding-top: 4px; padding-bottom: 4px; }
+      }
+      /* And a shorter phone on its side, 360 px tall, a common Android
+         size, where the steps above still left Back 15 px under the bar.
+         The title is in the top bar's band there, clear of its crumb on the
+         left. */
+      @media (max-height: 380px) {
+        .screen-credits { padding-top: 6px; }
+        .screen-credits h2 { margin-bottom: 2px; }
+        .screen-credits .menu { padding-top: 2px; padding-bottom: 2px; }
+      }
 
       .screen-modal { background: rgba(12, 18, 14, 0.72); }
 
@@ -5479,6 +5507,7 @@
       }
       .name-dialog-door:hover { color: var(--cream); }
       .name-dialog-row { display: flex; flex-wrap: wrap; gap: 8px; }
+      .name-dialog-row.rate-choices { flex-direction: column; align-items: stretch; }
       .name-dialog-btn {
         appearance: none; border: 1px solid rgba(244, 236, 214, 0.16);
         background: #121a14; color: var(--slate); font: inherit;
@@ -5628,6 +5657,28 @@
       .pause-chip { top: 52px; }
       .pause-chip[hidden] { display: none; }
       .touch-fly-on .pause-chip { display: none; }
+
+      /*
+       * START CHECKING RATES, in the centre column, just above the weight
+       * slider. The bug chip's absolute corner rule would steal it, so this
+       * puts it back in the column. It stays up in the air: the slider fades
+       * and this does not, because the press happens after they have flown.
+       */
+      .osd-air .rate-check {
+        position: relative; top: auto; right: auto; bottom: auto;
+        transform: none; z-index: 2; pointer-events: auto;
+        margin: 0 0 6px; max-width: 16em;
+        white-space: normal; text-align: center; line-height: 1.3;
+        letter-spacing: 0.03em;
+      }
+      .rate-check[hidden] { display: none; }
+      .osd-rates {
+        pointer-events: none; text-align: center; margin-bottom: 4px;
+        font-size: 12px; font-weight: 600; letter-spacing: 0.03em; line-height: 1.35;
+        color: var(--cream); text-shadow: var(--osd-edge);
+      }
+      .osd-rates-was { color: var(--osd-slate); }
+      .osd-rates[hidden], .osd-rates-was[hidden] { display: none; }
 
       .music-dock.on-flight {
         right: auto; left: 16px; top: 16px;

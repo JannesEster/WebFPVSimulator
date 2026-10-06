@@ -6,6 +6,15 @@
  * the builder. At most once a week per browser (localStorage). Never during
  * a run. Never for existing patrons if the sim can tell.
  *
+ * ON THE PAGE, NOT IN A SCREEN. Until 2026-10-05 the shell put the prompt
+ * inside .screen-results or .screen-paused. A screen is pointer-events
+ * none, which its children inherit, so a click on the close button or a
+ * link went through to the page behind it, and the prompt went hidden with
+ * the screen and came back on the next one. The builder put it inside its
+ * dialog, which has none of these styles. So the prompt goes on the body,
+ * the one place every page has, and whoever shows it puts it away (main.js
+ * does so the moment the screen it was shown on is left).
+ *
  * This file is part of WebFPVSimulator.
  *
  * WebFPVSimulator is free software: you can redistribute it and/or modify
@@ -27,6 +36,24 @@ import { counting, eventsUrl } from './stats.js';
 const SUPPORT_PROMPT_KEY = 'webfpv.support.prompt.v1';
 const SUPPORT_DISABLED_KEY = 'webfpv.support.disabled.v1';
 const ONE_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+
+/* The shell's settings, where Settings > Advanced > Support prompts is
+ * kept: SETTINGS_KEY in src/ui/ui.js, and SHELL_SETTINGS_KEY in
+ * src/trackbuilder/app.js reads the same blob. Read here so the builder,
+ * which is another page and has no settings of its own for this, keeps a
+ * pilot's Off as well as the shell does. */
+const SHELL_SETTINGS_KEY = 'webfpv.settings.v3';
+
+/* A link with its tags added as parameters. Appending '?utm_source=...' to
+ * an address that already had a query wrote two question marks into the
+ * Patreon link, and the tier id became '29740590?utm_source=sim-prompt'. */
+function tagged(base, params) {
+  const url = new URL(base);
+  for (const [k, v] of Object.entries(params)) {
+    url.searchParams.set(k, v);
+  }
+  return url.href;
+}
 
 /* Stripe tip link: one-off, USD $5 suggested, payer can change the amount */
 export const TIP_URL = 'https://donate.stripe.com/7sY4gzaAC2Eu3aOews8so0g';
@@ -56,10 +83,16 @@ function writePromptState(lastShownMs) {
   }
 }
 
-/* Check if the prompt is disabled in settings */
+/* Check if the prompt is disabled in settings: this module's own key, or
+ * the shell's Support prompts switch set to Off. */
 export function isPromptDisabled() {
   try {
-    return localStorage.getItem(SUPPORT_DISABLED_KEY) === 'true';
+    if (localStorage.getItem(SUPPORT_DISABLED_KEY) === 'true') {
+      return true;
+    }
+    const raw = localStorage.getItem(SHELL_SETTINGS_KEY);
+    const shell = raw ? JSON.parse(raw) : null;
+    return Boolean(shell && shell.supportPrompts === false);
   } catch (e) {
     return false;
   }
@@ -100,11 +133,15 @@ function recordPromptShown(trigger) {
   }
 }
 
-/* Record a click on one of the support options */
+/* Record a click on one of the support options. The board counts a
+ * support click from 'sim' or 'landing' and refuses any other source
+ * (SUPPORT_SOURCES in its src/validate.js), so the 'sim-prompt-pb' this
+ * sent was never counted. A prompt's click is the simulator's; which
+ * prompt it was rides on the link itself, as ref and client_reference_id. */
 function recordPromptClick(trigger, target) {
   try {
     if (counting()) {
-      const body = JSON.stringify({ v: 1, kind: 'support_click', source: `sim-prompt-${trigger}`, target });
+      const body = JSON.stringify({ v: 1, kind: 'support_click', source: 'sim', target });
       navigator.sendBeacon(eventsUrl(), new Blob([body], { type: 'text/plain;charset=UTF-8' }));
     }
   } catch (e) {
@@ -115,10 +152,13 @@ function recordPromptClick(trigger, target) {
 /*
  * Show the support prompt. `trigger` is one of: 'pb' (personal best),
  * 'time' (20 minutes of flying), or 'publish' (published a map).
- * `container` is the DOM element to append the prompt to.
+ * `onSettings`, when given, is what the Settings button does, and without
+ * it there is no Settings button: the builder has no settings room to
+ * open, and a button that only closed the prompt said otherwise. Returns
+ * the prompt, on the body, or null when it is not to be shown.
  */
-export function showSupportPrompt(trigger, container) {
-  if (!canShowPrompt() || !container) {
+export function showSupportPrompt(trigger, { onSettings = null } = {}) {
+  if (!canShowPrompt() || !document.body) {
     return null;
   }
 
@@ -137,7 +177,7 @@ export function showSupportPrompt(trigger, container) {
   actions.className = 'support-prompt-actions';
 
   const patreonBtn = document.createElement('a');
-  patreonBtn.href = `${PATREON_JOIN_URL}?utm_source=sim-prompt&ref=sim-prompt`;
+  patreonBtn.href = tagged(PATREON_JOIN_URL, { utm_source: 'sim-prompt', ref: 'sim-prompt' });
   patreonBtn.target = '_blank';
   patreonBtn.rel = 'noopener noreferrer';
   patreonBtn.className = 'support-prompt-btn support-prompt-btn-primary';
@@ -147,7 +187,7 @@ export function showSupportPrompt(trigger, container) {
   });
 
   const tipBtn = document.createElement('a');
-  tipBtn.href = `${TIP_URL}?utm_source=sim-prompt&client_reference_id=prompt-${trigger}&ref=sim-prompt`;
+  tipBtn.href = tagged(TIP_URL, { utm_source: 'sim-prompt', client_reference_id: `prompt-${trigger}`, ref: 'sim-prompt' });
   tipBtn.target = '_blank';
   tipBtn.rel = 'noopener noreferrer';
   tipBtn.className = 'support-prompt-btn';
@@ -156,17 +196,17 @@ export function showSupportPrompt(trigger, container) {
     recordPromptClick(trigger, 'tip');
   });
 
-  const settingsBtn = document.createElement('button');
-  settingsBtn.type = 'button';
-  settingsBtn.className = 'support-prompt-btn-text';
-  settingsBtn.textContent = 'Settings';
-  settingsBtn.addEventListener('click', () => {
-    prompt.remove();
-    /* The settings action would be handled by the caller, opening the settings menu */
-    if (prompt.onSettingsClick) {
-      prompt.onSettingsClick();
-    }
-  });
+  let settingsBtn = null;
+  if (typeof onSettings === 'function') {
+    settingsBtn = document.createElement('button');
+    settingsBtn.type = 'button';
+    settingsBtn.className = 'support-prompt-btn-text';
+    settingsBtn.textContent = 'Settings';
+    settingsBtn.addEventListener('click', () => {
+      prompt.remove();
+      onSettings();
+    });
+  }
 
   const closeBtn = document.createElement('button');
   closeBtn.type = 'button';
@@ -177,9 +217,12 @@ export function showSupportPrompt(trigger, container) {
     prompt.remove();
   });
 
-  actions.append(patreonBtn, tipBtn, settingsBtn);
+  actions.append(patreonBtn, tipBtn);
+  if (settingsBtn) {
+    actions.append(settingsBtn);
+  }
   prompt.append(closeBtn, message, actions);
-  container.append(prompt);
+  document.body.append(prompt);
 
   return prompt;
 }
