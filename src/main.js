@@ -65,6 +65,7 @@ import { PAD_CALM } from './input/padgate.js';
 import { mountTouchSticks, touchWanted } from './input/touchsticks.js';
 import { RcLink, LINK_DEFAULT, LINK_PRESETS } from './input/link.js';
 import { FlightRecorder, downloadText, flightLogName } from './share/flightlog.js';
+import { PASS_LIMIT, RateCoach } from './fc/ratemyrates.js';
 import { PRACTICE_LAPS, Race, runComplete } from './game/race.js';
 import { TrickDetector } from './game/trickdetect.js';
 import { deriveObstacles, OB_BAR, OB_POLE } from './game/obstacles.js';
@@ -114,7 +115,7 @@ import { MAP_PRELOAD } from './maps/preload.js';
 import { TUNES, tuneById, tunePath } from '../configs/registry.js';
 import { airframeById, simIdFor } from '../configs/airframes.js';
 import { buildWhoopCraft } from './render/whoopcraft.js';
-import { hoverStickPercent, normaliseRates, ratesAreDefault, ratesDiff, ratesSummary, TOUCH_RATE_DEFAULTS } from '../configs/rates.js';
+import { hoverStickPercent, normaliseRates, ratesAreDefault, ratesDiff, ratesShort, ratesSummary, TOUCH_RATE_DEFAULTS } from '../configs/rates.js';
 import { clearPidsFor, PID_AXES, pidCliKey, pidsDiffFor, SLIDER_KEYS, SLIDERS } from '../configs/pids.js';
 import { cliMap, composeConfig, moduleDump, moduleGet, RATES_KEEP, ratesFromDump, readFcDump, tuneBody, writeFcDump } from './fc/dump.js';
 import { GATE_SCALE } from './game/track.js';
@@ -362,6 +363,10 @@ const RC_HZ = 250;
  */
 const SIM_HZ = 1000;
 const MS_PER_STEP = 1000 / SIM_HZ;
+/* The state block's body rates are rad/s and every reader of them that
+ * shows a pilot a number wants deg/s. src/share/flightlog.js writes the
+ * same factor inline for its gyro columns. */
+const RAD_TO_DEG = 57.29577951308232;
 /*
  * How near a wall a Wall Ride is flown, in metres.
  *
@@ -2689,6 +2694,53 @@ export async function boot({ loading, bootStart, mapId }) {
    * quad's log go through the same parser and the same report.
    */
   const flightLog = new FlightRecorder();
+  /*
+   * THE RATE MY RATES ACCUMULATOR, which is always allocated and only ever
+   * fed while the card is up.
+   *
+   * ALWAYS ALLOCATED, because unlike the flight recorder beside it this
+   * costs nothing to have: it is a handful of fixed arrays, about ten
+   * kilobytes, and it does not grow with the length of the flight. See
+   * src/fc/ratemyrates.js on fixed memory.
+   *
+   * ONLY FED WHILE MEASURING, because a session is a thing a pilot started.
+   * `ui.measuring` is set by the gate card and cleared by every other card,
+   * and the rising edge is what resets the accumulator, so pressing the card
+   * is what begins a fresh measurement.
+   *
+   * RESET WHEN THE RATES MOVE UNDER IT, because the fit is a change FROM the
+   * profile that was flown and a flight measured against two profiles is two
+   * flights. The session knows; it does not reset itself, because a silent
+   * restart is a session the pilot thinks they flew.
+   */
+  const rateCoach = new RateCoach(ui.settings.rates);
+  let rateArmed = false;
+  /*
+   * A FINISHED PASS, WAITING FOR A FRAME BOUNDARY TO BE APPLIED ON.
+   *
+   * The coach notices a pass is full inside the physics block, and applying
+   * rates means sim_init, which resets every parameter group and re-seats
+   * the craft (see the rates branch of applySettings). Doing that halfway
+   * through a frame would invalidate the two states the renderer is about
+   * to interpolate between, so the frame would draw a pop. Flagged here and
+   * handled at the TOP of the next frame, before anything has been stepped
+   * or read, which is the same moment a settings change from a menu lands.
+   */
+  let ratePassReady = false;
+  /*
+   * TRUE ONLY WHILE THE COACH'S OWN RATES CHANGE IS IN FLIGHT.
+   *
+   * A separate flag from ratePassReady, and the separation is a bug fix.
+   * The two facts are not the same: ratePassReady means "a pass has filled",
+   * and what the settings path needs to know is "the rates change you are
+   * being handed is mine, not the pilot's". They were one flag, cleared one
+   * line before applySettings rather than after it, so the guard that exists
+   * to stop the coach reading its own output as the pilot moving a row was
+   * open at exactly the moment it was needed. Every pass reset the run, the
+   * pass counter never reached two, and the loop silently did nothing for
+   * the whole of its first evening. See PROGRESS.md 2026-10-05.
+   */
+  let rateApplying = false;
   /*
    * Stick samples waiting for an RC slot, and the value currently held.
    *
@@ -5554,6 +5606,48 @@ export async function boot({ loading, bootStart, mapId }) {
     if (flightLog.on !== s.flightLog) {
       flightLog.setEnabled(s.flightLog);
     }
+    /*
+     * THE RATE SESSION, ARMED ON THE EDGE AND RESET WHEN THE RATES MOVE.
+     *
+     * Two separate reasons to start over, and they are deliberately not one
+     * branch, because the pilot is told different things about them.
+     *
+     *   The EDGE. `ui.measuring` goes true when the Rate my Rates card is
+     *   pressed and false when any other card is, so pressing the card is
+     *   what starts a fresh measurement. Pressing it again starts another
+     *   one, which is what the room's "Start again" row does.
+     *
+     *   The RATES. The fit is a change from the profile that was flown, so a
+     *   flight measured half on one profile and half on another is not a
+     *   measurement of either. Taking a proposal, or nudging one row on the
+     *   Rates screen, lands here and starts the next session against the new
+     *   numbers, which is exactly the loop that converges: fly, take, fly
+     *   again. The room says so on its "Flying now" row.
+     */
+    const wantRate = Boolean(ui.measuring);
+    if (wantRate !== rateArmed) {
+      rateArmed = wantRate;
+      rateCoach.reset(s.rates);
+      ratePassReady = false;
+    } else if (rateArmed && !rateApplying && rateCoach.staleFor(s.rates)) {
+      /*
+       * THE PILOT MOVED THE RATES UNDER A RUN, so the pass in progress is
+       * void and the run is not.
+       *
+       * NOT THE COACH'S OWN APPLY. Applying a pass IS a rates change and
+       * lands in this very branch, so rateApplying is what tells the two
+       * apart. It has to be a flag of its own: this guard used to read
+       * ratePassReady, which the apply block cleared one line too early, so
+       * the coach read its own output as the pilot's edit and reset the run
+       * on every single pass. The counter never reached two.
+       *
+       * AND restartPass, NOT reset. reset starts a new RUN and moves
+       * `opening`, which is the undo target, so a pilot three passes in who
+       * nudged one number would have been offered a put-it-back that put
+       * them back to what those three passes had already done to them.
+       */
+      rateCoach.restartPass(s.rates);
+    }
     audio.setLevel(s.volume / 10);
     audio.setEnabled(s.sound);
     applyMix(s);
@@ -7566,6 +7660,50 @@ export async function boot({ loading, bootStart, mapId }) {
       prevWall = nowWall;
       return;
     }
+    /*
+     * A FINISHED RATE PASS, APPLIED HERE AND NOWHERE ELSE.
+     *
+     * Before anything is stepped or read this frame, because applying it is
+     * a sim_init and a re-seat. See ratePassReady.
+     *
+     * THIS IS THE WHOLE OF THE SELF IMPROVING LOOP, and it is four lines
+     * because the hard parts are elsewhere: the coach decides when a pass
+     * is full and what the next profile is, and the ordinary settings path
+     * does the applying, exactly as it does when a pilot moves a row on the
+     * Rates screen. Nothing new reaches the module and no second way of
+     * writing a rate profile exists.
+     *
+     * WHY CHANGING THE RATES MID FLIGHT IS NOT RUDE HERE, when the Rates
+     * screen warns about it. The pilot pressed a card that exists to retune
+     * them, so the change is the mechanism rather than a surprise, and the
+     * craft keeps its position and attitude across the swap because
+     * reseatAfterConfigSwap already handles that for the menu's own mid-run
+     * changes. They are told each time it happens, the room shows every
+     * pass, and the profile they arrived on is kept so it can be put back.
+     */
+    if (ratePassReady) {
+      const pass = rateCoach.pending();
+      if (pass) {
+        /* Raised BEFORE the settings path and lowered after it, which is the
+         * whole of the ordering that was wrong. See rateApplying. */
+        rateApplying = true;
+        ui.settings.rates = normaliseRates(pass.rates);
+        ui.persistSettings();
+        applySettings(ui.settings);
+        rateApplying = false;
+        /* What the settings path ACTUALLY put on the quad, which is what the
+         * next pass has to be anchored on. */
+        const report = rateCoach.accept(ui.settings.rates);
+        notice = {
+          text: report
+            ? `Rate my Rates: ${report.why === 'settled' ? 'settled' : 'stopped'} after ${report.passes.length} pass${report.passes.length === 1 ? '' : 'es'}.\n${ratesShort(ui.settings.rates)}`
+            : `Rate my Rates: pass ${pass.pass} of up to ${PASS_LIMIT} applied.\n${ratesShort(ui.settings.rates)}`,
+          untilMs: performance.now() + 4200,
+        };
+        ui.renderMenu();
+      }
+      ratePassReady = false;
+    }
     const blockStart = performance.now();
     const dt = Math.min(nowWall - prevWall, 100);
     prevWall = nowWall;
@@ -8046,6 +8184,42 @@ export async function boot({ loading, bootStart, mapId }) {
         /* Launch stand constraint runs inside sim_step. Ground contact
          * runs after plant_step at 1 kHz when the plane is raised. */
         flightLog.push(stateCurr, rcHeld, FULL_THROTTLE_RPM);
+        /*
+         * AND THE RATE MEASUREMENT, WEIGHTED BY SIMULATED TIME.
+         *
+         * `flown * MS_PER_STEP` is how long the craft actually flew this
+         * frame, not how long the frame took, and that distinction is the
+         * whole reason this line is here rather than in the render loop.
+         * The accumulator has to be weighted by time or a 144 Hz machine
+         * measures a different pilot from a 60 Hz one, and SIMULATED time
+         * makes that exact rather than approximate: the integrator takes
+         * the same number of 1 ms steps for the same flight whatever the
+         * browser is doing, so the weighting does not depend on the frame
+         * rate at all. A dropped frame moves neither the trajectory nor the
+         * measurement. See CLAUDE.md, "Physics never reads frame time":
+         * nothing here reaches the integrator, and nothing here reads the
+         * wall clock either.
+         *
+         * OFF THE STAND ONLY. A craft held on the launch stand has its
+         * sticks read and its rates applied, and none of it is flying, so
+         * counting it would put however long the pilot sat on the grid into
+         * the occupancy of a centred stick. Replays are out for the same
+         * reason: a replay is somebody else's hands.
+         */
+        if (rateArmed && !ratePassReady && !stood && !replayMode && flown > 0) {
+          rateCoach.push(
+            (flown * MS_PER_STEP) / 1000,
+            rcHeld,
+            {
+              roll: Math.abs(stateCurr[11]) * RAD_TO_DEG,
+              pitch: Math.abs(stateCurr[12]) * RAD_TO_DEG,
+              yaw: Math.abs(stateCurr[13]) * RAD_TO_DEG,
+            },
+          );
+          if (rateCoach.pending()) {
+            ratePassReady = true;
+          }
+        }
       }
       /*
        * Ground is a plane in the plant, not a sphere test after the
@@ -10571,6 +10745,25 @@ export async function boot({ loading, bootStart, mapId }) {
   /* The recorded CSV itself, so a capture can check the file the download
    * button would write without driving a file dialog. */
   window.__flightLogCsv = () => flightLog.csv();
+  /*
+   * The rate measurement, so a capture can fly a known stick program and
+   * ASSERT what was measured rather than reading it off a screenshot.
+   *
+   * Whether it is armed is in here on purpose: "nothing was measured" and
+   * "nothing was watching" look identical from the outside and have
+   * completely different causes, and the first version of this feature shipped
+   * with a session that measured a flight correctly into a room that could
+   * not draw it.
+   */
+  window.__rateMyRates = () => ({
+    armed: rateArmed,
+    measuring: Boolean(ui.measuring),
+    seconds: rateCoach.session.seconds,
+    moveSeconds: rateCoach.moveSeconds,
+    pass: rateCoach.pass,
+    coachState: rateCoach.state,
+    read: ui.rateProbe ? ui.rateProbe() : null,
+  });
   /* The ghost, so a capture can ASSERT a chase: what is armed, what the
    * recorder holds, where the rig is and how present it is. */
   window.__ghost = () => {
@@ -11145,6 +11338,34 @@ export async function boot({ loading, bootStart, mapId }) {
       },
       keys: [...input.keys].filter((k) => input.isStickKey(k)).sort(),
       sticks: [r2(ch.roll || 0), r2(ch.pitch || 0), r2(ch.yaw || 0), r2(ch.throttle || 0)],
+    };
+  });
+  /*
+   * WHAT THE RATE SESSION HAS MEASURED, AND THE FIT OVER IT.
+   *
+   * Computed on demand rather than kept up to date, because the only thing
+   * that reads it is a screen a pilot has opened, and fitting a session is
+   * arithmetic over a dozen histograms: once when a room opens is free,
+   * sixty times a second while flying is work nobody can see. The
+   * accumulator is the thing that runs every frame, and all it does is add.
+   *
+   * Null when nothing has been measured, so the room can say so rather than
+   * draw a proposal built out of an empty session.
+   */
+  ui.setRateProbe(() => {
+    const report = rateCoach.report();
+    /* The pass in progress, which is what the room's progress readout and
+     * the title row read. The finished passes are in the report. */
+    return {
+      ...report,
+      armed: rateArmed,
+      moveSeconds: rateCoach.moveSeconds,
+      passProgress: rateCoach.passProgress,
+      passLimit: PASS_LIMIT,
+      /* Live, so a pilot mid pass can see where it is heading rather than
+       * only seeing an answer once the pass fills. Computed on demand in a
+       * screen's render, never per frame. */
+      live: rateCoach.moveSeconds > 0 ? rateCoach.peek() : null,
     };
   });
   ui.setLatencyProbe(() => ({

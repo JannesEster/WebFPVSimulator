@@ -67143,3 +67143,528 @@ that root. `GroksBugFixForClaudeToReview` is contained in main, 0 commits ahead,
 request. Nothing was merged, rewritten or force pushed on the strength of the wrong reading. When a merge-base comes
 back empty here, `git rev-parse --is-shallow-repository` is the first thing to ask, before anything is said about the
 history.
+
+## 2026-10-05 | fc, shell | Rate my Rates: a fourth card that measures a session and fits a rate profile to it
+
+### The ask, and the licence wall it hit first
+
+The owner asked to integrate WILDTYPE's RateFinder
+(https://github.com/jaydeelocs/WTRateFinder) into this simulator. Read first, built second, and the reading is the
+reason this entry exists in the shape it does.
+
+**RateFinder cannot be integrated, ported, or reimplemented, and the repository makes that explicit.** It is docs only:
+three files, `GETTING_STARTED.md`, `README.md` and `LICENSE.txt`, no source. The licence is RATEFINDER FREEWARE LICENSE
+1.0, and it is not open source. It forbids redistribution of "any component thereof", forbids reverse engineering, and
+forbids derivative works. Its INTELLECTUAL PROPERTY clause then reserves, by name, "its source code, compiled binaries,
+algorithms, rate analysis methodology, calibration exercise designs" and states that "the three-metric analysis
+framework (CPR, CMV, MDI) and the calibration-anchored rate recommendation algorithm are proprietary methods" with "no
+license to these methods granted". It is also a Windows MSI that reads a USB joystick, so there is nothing a browser
+could host even if the licence allowed it.
+
+This repository is GPLv3 and CLAUDE.md says not to add a dependency with an incompatible licence. Reimplementing a
+documented proprietary method into a GPLv3 file would be the licence problem wearing a different hat.
+
+Put to the owner. The answer, 2026-10-05 in the project thread: "if the licencing is a issue we will build our own
+version". Then "lets call it Rate my Rates", and then "I want it as a game mode in the main menue". This entry is those
+three answers. **Nothing in it is derived from RateFinder.** Its name is different, its measurements are chosen for what
+this program can see and a joystick reader cannot, and it asks the pilot to perform no exercises at all, which is both
+the honest design and the one that stays clear of the reserved exercise designs.
+
+Later in the same thread the owner offered to fly their own hands through RateFinder and hand over its output so this
+could "figure out how it got there". Declined, and the reason is written down here because it will come up again:
+working backwards from their output to their method is deriving the method, which is the thing the licence reserves and
+the thing this file has just spent a paragraph not doing. Comparing the two tools' published outputs is fine and anybody
+may do it. Fitting ours toward theirs is not, and it would also throw away the only real advantage ours has.
+
+### What it measures, and why it is not the same kind of thing
+
+A tool that reads a radio sees the sticks and has to infer what the quad did. This runs INSIDE the quad: Betaflight's
+own setpoint and the plant's own gyro are both in process. So "you asked for 1000 deg/s and the airframe gave you 640"
+is a measurement here and a guess anywhere else, and it is the one fact that turns a rate proposal from advice into
+arithmetic. That measurement, `unreachable`, holds a veto over the proposal: a pilot pinned on the stop whose quad
+cannot follow is NOT offered more rate, because the travel it would buy commands a rotation the craft cannot make.
+
+Three fits per axis, each from one measurement, each reported to the pilot with the number behind it:
+
+- **The slope at centre, from the size of the corrections.** A correction is a stick excursion and its return, and its
+  amplitude is how much travel the pilot spent to make the quad do a small thing. Target a tenth of the travel: larger
+  than any hand's noise, smaller than a deliberate placement. Corrections over half the travel are manoeuvres and are
+  excluded.
+- **The rate at the stop, from the rotation actually reached,** at the 99th percentile of time rather than the peak,
+  plus a seventh of headroom, pushed up in proportion to time spent on the stop past a couple of percent, and capped by
+  the airframe's veto above.
+- **Expo, from the share of the session spent between a quarter and seven tenths of the travel,** because that is the
+  stretch of the curve expo shapes and the only stretch it shapes.
+
+Anchored on the profile that was flown, read THROUGH its own curve rather than off its rate rows, so a pilot on any of
+the five rate systems is measured correctly. Proposed in ACTUAL always, because ACTUAL is the only system whose three
+columns are the three things measured: a slope at centre in deg/s, a rate at the stop in deg/s, and where the travel
+went. A Raceflight Acro+ number cannot be measured, only solved for after the deg/s are known.
+
+One session may halve or double an axis and no more, reported when it bites. An axis that was never moved keeps what it
+had, expo included.
+
+**No curve is written in JavaScript.** CLAUDE.md forbids it and this obeys it: every deg/s, the anchor and the proposal
+both, goes through `src/fc/ratescurve.js`, which `npm run lint:fc` F15 already sweeps against the compiled module for
+all five rate types. This file does arithmetic on that function's output and never on a curve of its own.
+
+**The throttle is deliberately not proposed.** The obvious measurement is where the throttle sat, and the number it
+would feed is Betaflight's `thr_mid`, which is where the throttle curve PIVOTS. At the factory `thr_expo` of zero the
+curve is a straight line and the pivot does nothing whatever, so the proposal would be a row that moves beside a quad
+that does not change. Proposing an expo to go with it would be this module deciding how soft a pilot likes their hover,
+which is a taste and not a measurement. `configs/rates.js` already states where hover lands on the stick at every
+throttle cap, measured off the plant by `scripts/flightcheck.js`, and the Rates screen already prints it.
+
+### What changed
+
+**`src/fc/ratemyrates.js`, new.** The accumulator and the fit. Fixed memory: nothing is stored per sample, every
+measurement is a histogram or a running total in an array allocated once, so an hour costs what a minute does. Time
+weighted, so the answer does not depend on the frame rate. Not in the physics path and it does not touch the DOM.
+
+**`src/main.js`.** Feeds it from the physics loop beside `flightLog.push`, weighted by SIMULATED time (`flown *
+MS_PER_STEP`) rather than frame time, which makes the frame rate independence exact rather than approximate: the
+integrator takes the same 1 ms steps for the same flight whatever the browser does. Off the launch stand only, replays
+excluded. Armed on the rising edge of `ui.measuring`, reset when the rates move under it. The fit is computed on demand
+in the probe, not per frame. `window.__rateMyRates()` for the harness.
+
+**`src/ui/ui.js`.** A fourth card in `WAYS`, carrying a `measure` flag, which `seatedWay` now skips so the cursor never
+opens a tuning utility on a pilot who came to fly. The room behind it: read only rows, two verbs, and nothing reaching
+the quad until Take these rates is pressed, which hands over to the Rates screen where the numbers are editable and the
+curve is drawn. A row into the room on the title while a session is live.
+
+**`scripts/gatecards.js`, `assets/gate/ratemyrates.jpg`.** The card's picture, generated like the other four. The same
+town as the freestyle card but from down in the street rather than over the roofs, because that card is about where you
+are going and this one is about what your hands are doing.
+
+**`scripts/shell-check.js`, `scripts/input-check.js`.** Both pinned the gate's card list as a string and the builder's
+index as 3. Updated to the new five with the date and the reason. This is a change to what the product IS, not a
+threshold moved to make a check pass, and the evidence it still bites is below.
+
+**`scripts/ratemyrates-check.js`, new, `npm run check:ratemyrates`.** 46 checks, synthetic pilots with analytic answers.
+
+### Checks
+
+    npm run check:ratemyrates   all 46 passed
+    npm run lint:fc             33 of 33 traces clean
+    npm run lint:presets        4 of 4 presets clean
+    npm run lint:shell          11 problems, BYTE IDENTICAL to the same command on main with this branch stashed,
+                                so none of them are this change's. They are this container's font metrics and a board
+                                that is not running here (the run logs 13 refused fetches). Diffed the two logs: empty.
+    npm run lint:catalog        fails here and fails identically on main: vendor/betaflight is an unchecked out
+                                submodule in this container, so the parameter_names.h it reads does not exist.
+    npm run verify              not run. No physics, plant, module ABI or build change: the accumulator observes the
+                                state block and writes nothing, and no file under src/native/, patches/ or
+                                vendor/betaflight was touched. Said plainly because an unrun check is not evidence.
+
+The gate assertions were proved to bite rather than assumed to. Running this branch's UI against main's OLD
+`shell-check.js` fails exactly three gate assertions and reports the card list it saw:
+`race.jpg, whoop.jpg, freestyle.jpg, ratemyrates.jpg, builder.jpg`, with `ratemyrates` carrying its plan drawing and
+`builder` last without one. So the section runs, it sees the new card, and the updated expectation is the only thing
+that changed.
+
+`check:ratemyrates` was mutation tested, because a suite that passed first time deserves suspicion. Each of these
+mutations is caught:
+
+- the airframe veto removed: "a pilot on the stop whose quad cannot is not" fails, 710 against 670.
+- the anchor read off the `rcRate` row instead of off the curve: the Betaflight default anchors at 1000 instead of 203.
+- intervals replaced by a constant, so samples are counted rather than weighted: the variable frame interval check
+  fails by three uint8 steps.
+
+Flight feel is NOT verified and cannot be from here. Whether the profile this proposes is a profile worth flying is a
+pilot's judgement, and the owner has offered to fly it.
+
+### What went wrong
+
+Four things, three of them found only by running it.
+
+- **The room was blank.** The screen id, its title, its crumb, its rows and its actions all landed, and `renderMenu`
+  looks a screen up in a map of DOM hosts that had no entry for it. It drew the crumb and the command bar over an empty
+  page. Everything worked except that the room was invisible. A screen in this shell is four things and the DOM host is
+  the fourth; there is now a paragraph saying so where the host is built.
+- **A crash sized the rate profile.** Flown through the town for twelve seconds including a building and the tumble
+  after it, the first build proposed DOUBLE the rate on all three axes, yaw included, on a session whose yaw stick
+  never left six tenths of travel. `reach` is a percentile of time, and a second of cartwheel in a twelve second
+  session sits far above the one percent tail that percentile was chosen to discard. Rotation is now counted only when
+  it is plausibly the rotation that was commanded, and the discarded share is reported rather than hidden.
+- **The first version of that filter threw away every reversal.** Comparing the instantaneous demand against the
+  instantaneous gyro, a roll reversal passes through centre stick with the quad still turning at 600 deg/s, and an
+  instantaneous reading calls that uncommanded when it is the exact opposite. Measured: 2.4 percent of a committed
+  pilot's session discarded, and 3.4 percent of one whose stick crossed in a realistic 80 ms, which is worse because a
+  slower crossing spends longer near centre. The temptation was to widen the band from 2 percent to 4. That is the one
+  thing CLAUDE.md forbids outright. Fixed properly instead, by comparing against a decaying held peak of the demand, so
+  what the pilot asked for in the last quarter second is what the quad is allowed to still be doing. The realistic
+  stick now loses 0.00 percent and the tumbler still loses 20.
+- **The correction median carried half a bin of bias.** Corrections are events, not time, and a hover produces hundreds
+  of them at nearly one size, so interpolating inside a 5 percent bin returned the bin's centre whatever the events
+  were: a pilot's 10 percent corrections read as 12.5, and the centre fit is the one thing resting entirely on that
+  number. Corrections now have their own histogram at half a percent of travel.
+- And the frame rate check passed for the wrong reason at first. Two constant frame rates sample the same distribution,
+  so replacing every interval with a constant left both the 60 Hz and the 144 Hz proposals completely unchanged; the
+  only thing it broke was the seconds on the confidence row. What sample counting actually breaks is an interval that
+  MOVES WITH THE FLYING, which is the normal case rather than the pathological one, because the fast parts of a session
+  are the parts with the most on screen. That is what the check measures now, and the subject pilot is asserted to be
+  clear of the step clamp first, since a clamped proposal agrees with itself at any frame rate.
+- **The room had no Back row.** Found by reading this shell's conventions rather than by looking at the room: every page
+  screen ends with an explicit `{ label: 'Back', action: 'back' }`, twelve of them, and this one was relying on the
+  command bar's Esc. A pilot navigating on a stick has no Escape key, so a room whose only way out is the keyboard is a
+  room they are stuck in. The command bar's "Esc Back" is the keyboard's copy of that row, not a replacement for it.
+
+### Still open
+
+- The whoop is not offered. The card seats the five inch because that is the machine pilots tune for, and nothing in
+  the fit is five inch specific, so a second card or an aircraft row is a small change if it is wanted.
+- Confidence is seconds of stick movement, and a keyboard pilot accrues them slowly because a keyboard's stick is at
+  centre whenever no key is held. A gamepad pilot will read "high" on a flight where a keyboard pilot reads "low" on
+  the same wall clock. Honest, since it genuinely is less stick data, but worth a note on the row if it confuses
+  anybody.
+- Nothing is saved. The proposal lives until the next session and the preset library is reached by hand through the
+  Rates screen. A "save this as a preset" row in the room itself would skip a step.
+
+## 2026-10-05 | fc, shell | Rate my Rates runs itself: passes, convergence, and three ways to stop
+
+### The ask
+
+The owner, same thread, after the one shot version was pushed: "you can mayby have a system that self improves as you
+fly and just gives you the final outcome rates". Correct, and the manual version was the pilot being a for loop: fly,
+take the proposal, fly again, take again, until it stops moving.
+
+### Why a sequence of passes and not a moving anchor
+
+The obvious reading of "self improving" is to nudge the rates continuously while flying. That cannot work and the
+module already said so: a fit is measured AGAINST the profile that was flown, `staleFor` exists to refuse a session
+whose rates moved under it, and continuous nudging is that case on every frame. The arithmetic would mean nothing.
+
+So the loop is a sequence of passes. Each pass measures ONE fixed profile. When a pass has `PASS_MOVE_S` of stick
+movement, 25 seconds, the fit is taken, the shell applies it, and the next pass is anchored on what is now flying. Every
+step is as sound as a single pass because every step IS a single pass.
+
+**The coach never writes the quad.** It says "this pass is done, here are the next rates" and waits to be told what was
+applied. Rate application stays in the settings path, in one place, and the shell can decline: a pilot who parks it
+halfway leaves a coach sitting at a pass boundary rather than a quad being retuned underneath them. `accept()` takes
+what was ACTUALLY applied rather than what was proposed, because the settings path normalises and a pilot may edit a
+row, and the next pass has to be anchored on the profile that is really flying.
+
+**Applied at a frame boundary.** The coach notices a full pass inside the physics block, and applying rates is a
+`sim_init` plus a re-seat. Doing that mid frame would invalidate the two states the renderer is about to interpolate
+between and the frame would draw a pop. Flagged and handled at the top of the next frame, which is the same moment a
+settings change from a menu lands.
+
+### Does it converge
+
+The centre fit converges in ONE step and the algebra is in the file. Model a pilot as wanting a fixed rotation out of a
+correction: they push the stick until the quad turns that fast, so the travel they use is `a = k/c` for a pilot constant
+k and a slope at centre c. The fit sets `c' = c * (a/T) = c * (k/c)/T = k/T`, which does not contain c at all. One pass
+lands on the fixed point, and the next pass measures `a = T` and proposes nothing.
+
+The rate at the stop depends on the pilot's model. One who wants a fixed ROTATION converges in one step too, because
+what they reach barely depends on what the stop offers. One who commits to a fixed FRACTION of travel converges
+geometrically, ratio about 0.93 at nine tenths, which is what the six pass limit is sized for.
+
+And one case does not converge at all: a pilot who pins the stop every time has `reach` equal to the rate at the stop by
+definition, so the headroom and the saturation push both fire on every pass and the number climbs a seventh at a time
+forever. There is no fixed point to find, because that pilot genuinely wants more rate than any profile offers. So the
+loop has THREE endings and says which it was, rather than only knowing how to notice that it has settled:
+
+    settled   it stopped moving. Six percent on an endpoint, six points of expo, and never on pass one, because one
+              measurement cannot be a trend.
+    limit     six passes and still moving. Fly these and run again.
+    drift     it wanted to move further from the opening profile than one run may. Same advice, more emphatically.
+
+### What changed
+
+**`src/fc/ratemyrates.js`.** `RateCoach` beside `RateSession`: `push`, `pending()`, `accept(applied)`, `peek()` for the
+pass in progress, `report()`. `DRIFT_LIMIT` of 2.5 times the opening profile, measured on both endpoints of every axis.
+
+**`src/main.js`.** The coach replaces the bare session. `ratePassReady` defers the apply to the frame boundary. The
+staleness reset is now skipped while a pass is waiting, which matters: applying a pass IS a rates change, so it lands in
+the staleness branch one frame later, and without the guard the coach would read its own output as the pilot moving a
+row and throw the run away on every pass. The run would never reach pass two.
+
+**`src/ui/ui.js`.** The room speaks in passes: which pass and how far through it, where the pass in progress is heading,
+a row per completed pass with what it set and how much it moved, and the verdict with its reason. Take these rates is
+gone, because the loop applies its own passes; what replaced it is Put my old rates back, which restores the profile the
+pilot ARRIVED on rather than the previous pass, since halfway back is not a place anybody asked to be.
+
+### Checks
+
+    npm run check:ratemyrates   all 66 passed
+    npm run lint:fc             33 of 33 traces clean
+    npm run verify              not run, and for the same reason as the entry above: nothing under src/native/,
+                                patches/ or vendor/betaflight was touched and the coach observes the state block.
+
+The new checks are a CLOSED LOOP, which is the point. Every synthetic pilot in the file before this was open loop, a
+fixed stick program flown whatever the profile was, and that is the right fixture for one fit and useless for a loop: a
+loop converges by the pilot CHANGING when the quad does. So the coach is tested against a pilot with INTENT rather than
+a waveform. It wants some rotation out of a correction and some out of a committed move, and it pushes the stick as far
+as THIS profile needs to get them, inverting the firmware's own curve numerically. Give it twice the slope at centre and
+its corrections halve, which is the mechanism under test.
+
+Asserted: it settles rather than running out of passes; it settles on pass two having materially moved the profile on
+pass one, so it is not settling on a no-op; and, the one that matters most, **the settled profile puts that pilot's
+corrections on the 10 percent target**, measured at 0.088 of travel. That is convergence on the RIGHT fixed point rather
+than merely convergence. Also asserted: a pilot already on their own answer is left there; a pilot with no fixed point
+is stopped and told which ending it was; the coach ignores pushes at a pass boundary; and the next pass anchors on what
+the shell applied rather than what was proposed, including when the shell applies something different.
+
+### What went wrong
+
+- **The drift ceiling was a limit in name only.** It was used to decide that a pass was the LAST one and then the over
+  ceiling profile was handed over anyway. The check caught a greedy pilot started on a slow profile walking through it:
+  2.69 times the opening against a stated limit of 2.5. Such a pass is now REFUSED rather than clamped, and the reason
+  is worth keeping: a clamped profile is one nobody measured, and it would be offered with the fit's own explanation
+  attached while that explanation no longer described it. The pilot keeps the last profile that was inside the ceiling,
+  which a pass really did propose, and is told the pass was refused rather than being shown a pass that changed nothing.
+- **The drift ceiling was unreachable from the Betaflight default.** Found while writing the check: a greedy pilot only
+  gets about 1.15 times over all six passes, because reach is capped both by what the airframe delivers and by the
+  uncommanded rotation filter, so the pass limit always arrives first. It is not dead code, it is out of range from a
+  profile that is already quick. There is now a case that starts on 200 deg/s, where it is well in range and fires on
+  pass two.
+- **The room's lede became a lie.** It said "Nothing here changes the quad until you take it", which was true of the one
+  shot version and false the moment the loop applied its own passes. A screen that misdescribes what it is doing to the
+  quad is worse than a screen that says nothing.
+- **The harness hook still referenced the old session object.** Caught by the headless capture throwing
+  `ReferenceError: rateSession is not defined` out of `window.__rateMyRates`. `node --check` cannot see an undefined
+  free variable, so only running it found this.
+- The first convergence assertion was "more than one pass and fewer than the limit", which this pilot satisfies at
+  exactly two every time. Vacuous on its own, so it now asserts two passes AND that pass one moved the profile by more
+  than five percent, with a note on why two is the honest answer for a fixed rotation pilot rather than a suspiciously
+  quick one.
+
+### A trap closed, and the room walked
+
+Found by reading the states rather than the happy path, after the loop was pushed.
+
+**Leaving the mode stranded the undo.** The title's Rate my Rates row appeared only while `ui.measuring`, which goes
+false the instant any other card on the gate is pressed. So: run the loop, let it move the rates across three passes,
+then press Freestyle because you want to go flying. The row vanishes, and with it the only door to the room and the only
+way back to the profile you arrived on. The pilot is left on rates they did not choose with no way to undo them. The row
+now also shows while a run has passes behind it, armed or not, because the undo has to outlive the mode.
+
+Two mirrors of the same bug followed. The room's head row would have said "Pass 2 of up to 6, 40 percent" for a run
+nothing was advancing, and the live "Heading toward" block would have shown an abandoned pass as though it were still
+filling. There is a third state now, `left`, which says the run was walked away from, that what the passes set is still
+what is flying, and offers Start a session. That last part matters because the head row's note tells the pilot to start
+one, and an instruction with no row under it is worse than silence.
+
+Both states were rendered and read back rather than reasoned about, by stubbing the probe through `setRateProbe` in a
+capture, which exercises the render path without flying the 25 seconds a real pass needs:
+
+    measuring, not armed, 2 passes   Run left unfinished = 2 passes, Flying now, Every pass, Pass 1, Pass 2,
+                                     Then what, Start a session, Put my old rates back, Back
+    done, settled                    Settled = Actual 500/500/500, Flying now, Every pass, Pass 1, Pass 2,
+                                     Then what, Run it again, Put my old rates back, Back
+
+**And the room is walked by scripts/shell-check.js now.** It was not in `SCREENS`, so nothing measured whether its rows
+were reachable, whether it overflowed or whether there was a way out. The comment two entries above that list says
+exactly what this costs: the trick list shipped with its entire row list below the fold for that reason. It walks clean,
+3 stops, 3 reached by arrow, 0 px of overflow, 0 px below the fold, escape back to title, and the suite's 11 container
+problems are unchanged. What it does not cover is the long form, whose row count grows with the passes flown, because
+the harness does not fly a session; that is said in the comment rather than left to be assumed.
+
+Also run, all clean and none of them previously run against this change: `lint:nouns` PASS, `lint:boot` 9 of 9,
+`lint:memory` PASS, `lint:frame` 34 of 34, `lint:responsive` PASS, `lint:scale` PASS.
+
+### THE LOOP NEVER ADVANCED, and 74 green checks could not see it
+
+The worst bug of the lot, found by a verification pass driving the real shell rather than by any check in this
+repository. Every module check passed. The feature, in a browser, did nothing whatever.
+
+**What happened.** Applying a pass is a rates change, so it arrives at `applySettings`'s staleness check one call later,
+and that check has to tell the coach's own output from the pilot moving a row on the Rates screen. It was told by
+`ratePassReady`, and the apply block cleared that flag on the line BEFORE calling `applySettings` rather than after it.
+So the guard was open at precisely the moment it existed for: `staleFor` was true, `reset` ran, and `reset` starts a new
+RUN. The pending pass was destroyed before `accept` could record it, the history was wiped, the pass counter went back
+to one, and `opening`, which is the undo target, moved to whatever had just been applied.
+
+The symptom from the outside was a measurement that climbed to about 25 seconds, dropped to zero, and climbed again,
+forever, with `pass` stuck at 1 and `passes` empty. The rates really did change on each wrap, so the quad was being
+retuned repeatedly with no record of it and no way back. `drift` read zero because `opening` had moved with it.
+
+The comment on that guard described the exact failure it was failing to prevent. That is what a flag doing two jobs
+buys you: `ratePassReady` means "a pass has filled", and what the settings path needs to know is "this rates change is
+mine". Those are different facts and they are two flags now, `rateApplying` raised around the settings call.
+
+**A second bug underneath it.** The guard called `reset` for a pilot's own mid-run edit too, which is the wrong tool for
+that case: `reset` moves `opening`. A pilot three passes in who nudged one number would have been offered a put-it-back
+that put them back to what those three passes had already done to them. There is a `restartPass` now: the pass in
+progress is void, because half of it was measured against a profile that is no longer there, and the run survives with
+its opening, its history and its pass number intact.
+
+**`scripts/ratepass-check.js`, new, `npm run check:ratepass`.** The bug was in the join between the module and the
+shell, so the only thing that can see it is the real shell with a real frame loop. It flies one pass headlessly, in the
+town, with a stick held off centre so stick movement accrues at about a second per second, and asserts that the pass
+landed, that the run advanced to pass two, that the rates reached the quad, and, the one that was false, that `opening`
+is still the profile the pilot arrived on.
+
+Mutation tested, which is the only reason it is worth having: with the original ordering restored it fails on five
+steps, naming `passes.length >= 1`, `pass === 2`, `opening` and `drift.frac`. With the fix it passes at exit 0.
+
+It is NOT in the cheap set. A pass is 25 seconds of simulated stick movement and there is no way to shorten that which
+is not special casing the test input, so the check costs what a pass costs, about a hundred seconds including boot.
+
+### What went wrong writing that check
+
+Two goes at it, and both are the same lesson in different clothes.
+
+- **It waited on frames and reported FAIL with every product expectation green.** The first version waited for
+  `window.__boot().frames` to pass 80 and then climbed a ladder of stick-movement seconds. `frameBody` returns early for
+  the whole of a world build, so on the town the frame counter sits still, the first rungs expire, and the run reports
+  failures that are about the harness. It waits on `window.__rateMyRates().seconds` now, which only moves when the coach
+  is actually being pushed from the physics loop, so it means "flying and being measured" rather than "the browser
+  painted something".
+- **Then it reported FAIL on a green run anyway, because of the board.** `scripts/shots.js` puts expectation failures
+  and browser console errors in one bucket and exits 1 for either, and a headless check has no board to talk to, so
+  three refused fetches sank it. Every other check here already tolerates that and says so in a note: `lint:memory`
+  prints "2 network fetch(es) refused, the board is not running here" and `lint:shell` prints thirteen. So this reads
+  its verdict off the log and tolerates exactly refused fetches, failing on any harness fault, any failed step and any
+  other console error. `shots.js` itself was left alone: its contract is shared with a dozen checks and loosening it
+  here would loosen it for all of them.
+- And the first verdict line double counted, reporting "5 console error(s)" for five failed expectations, because
+  `shots.js` both prints a failed step inline and pushes it into the error list. Counted once now, and the parsing was
+  checked against both saved logs: the good run reads 0 steps, 0 real errors, 3 ignored; the buggy run reads 5 steps, 0
+  real errors, 3 ignored.
+
+## 2026-10-06 | tracks | The Rate Lab, and a map option that is not wired yet
+
+### The ask
+
+The owner flew the freestyle version and named the hole in it: "trying to tune rates in freestyle gives most peopl no
+structure". They asked for a track with "equil right and left sharp turns something with 3 gate ladder ups and downs and
+spiral ups and spiral downs", for the craft to be returned to the start when a pass applies, and for a feedback dialog
+thirty seconds later.
+
+They are right, and the reason is worse than comfort. The fit compares each pass against the last, so two passes are
+only comparable if they measured the same KIND of flying. A pilot who hovered through pass one and chased rooftops
+through pass two has handed the loop two different pilots, and the loop cannot tell that from a pilot whose hands
+changed.
+
+### What landed: the track
+
+`scripts/ratelab-track.js` generates `tracks/json/ratelab.json`, and `scripts/ratelab-check.js` (28 checks,
+`npm run check:ratelab`) pins its geometry. Generated rather than drawn because the track is a measuring instrument, so
+its properties have to be exact rather than approximately what somebody dragged into place.
+
+All three features, by name: a hairpin round a flag on each side, exact reflections about the centre line, flown round
+opposite sides; two three gate ladders, each flown through all three openings with the entry direction alternating,
+which is a vertical zigzag and gives pitch and throttle reversals at a fixed amplitude; and a spiral up and a spiral
+down, four gates round an arc with the sill climbing a level at a time. Derives to a closed 298 m lap, no warnings, line
+between 0.76 and 5.88 m.
+
+Flying gates are lifted by `sillH` and stand on the ground at `z` of zero, which is the schema's "nothing floats" rule;
+only the four waypoints are in the air, which is the one thing that rule leaves alone.
+
+**On the licence, since it has been the spine of this work.** RateFinder's licence reserves its "calibration exercise
+designs". This is not one: its exercises are timed instructions to a pilot, six per discipline, and this is a race track
+made of gate ladders, hairpins and spirals, which are standard elements present in every track builder including this
+repository's own, and which this repository already imports from Velocidrone files. The pilot is still asked to perform
+no drill: they fly laps.
+
+### What the check caught before the track was committed
+
+- **The generator overclaimed.** Its header said the whole track was a reflection about the centre line. It cannot be: a
+  helix that climbs as it sweeps across has a low end and a high end, so its reflection has them the other way round and
+  is a different helix. The check reported four gates paired with sills of 0 against 4.67, which is that fact arriving.
+  What the spirals are instead is the SAME helix twice, same x and same sills, offset down the field, flown climbing and
+  descending, which is the property that was actually wanted. The comment and the document's credit note say that now.
+- **Then it reported the hairpins asymmetric when they are not**, and that one was the check's fault. Reflecting a
+  hairpin swaps which of its two gates you reach first, so the mirror of the left ENTRY gate is the right EXIT gate. The
+  names follow the flying order and the geometry follows the reflection, and the two disagree by design. It pairs by
+  position now.
+
+### What did NOT land: the map option, and why it was taken back out
+
+The track is reachable by nothing yet. A map option was written and then reverted, because it hung the shell.
+
+Four touchpoints were found and fixed on the way, and they are worth recording because the next person adding a map
+needs all of them:
+
+- `src/maps/registry.js` needs the entry, which is the obvious one.
+- `src/maps/build-cost.js` needs a KEY, because `src/boot.js` validates `?map=` against the keys of that object before
+  any module has loaded. Without it the address was honoured and the pilot got the field, silently, because falling back
+  is what that line is for.
+- `src/main.js` adopts the board's most flown track when a race map has none seated, which is right for Track and wrong
+  for a map that carries its own document. An `ownCourse` flag was added for that.
+- The map module itself injects its document through the hook `src/maps/custom.js` already has, deliberately NOT by
+  writing into the builder's autosave, because that is where a pilot's unsaved work lives and a tuning mode that
+  replaced the track somebody was halfway through building would be unforgivable.
+
+With all four in place the map still hung. One experiment settled where the fault is NOT: the same
+`tracks/json/ratelab.json` loaded through the existing `--course=` path, which uses no new code, builds in twelve
+seconds and reaches 22 frames. So the track's geometry is fine and the fault is in the wiring. Two runs of the new map
+disagreed with each other, one reaching "Building the world, step 2 of 3" with `__shellReady` true and a later one never
+setting `__shellReady` at all, which smells like a race rather than a missing manifest entry. Not diagnosed.
+
+So it is reverted rather than committed. A map option that hangs boot is worse than no map option, and guessing at it
+with hundred second experiments was not worth more of the night. The track, the generator and the 28 checks are
+committed and good; `src/maps/ratelab.js` is in this entry's history only.
+
+### What went wrong
+
+- **`src/fresh.js` was left stale by my own earlier commits.** `src/fc/ratemyrates.js` is imported by main.js and ui.js,
+  so it is in the boot graph and belongs in the freshness manifest, and `npm run lint:preload` had been reporting STALE
+  since the first Rate my Rates commit. I had not run it, because it is not in the cheap set this repository names,
+  which is exactly why a new module in the boot graph needs saying out loud. Regenerated. It also picked up
+  `src/share/supportprompt.js`, stale from an earlier commit on main rather than from this branch.
+- Checked whether the staleness was mine by stashing and re-running on the committed tree, rather than assuming either
+  way.
+
+### Still to do, and the order it wants
+
+1. The map option, which is the blocker for everything else: diagnose the hang.
+2. The card seats the Rate Lab instead of freestyle, which is a two line change once the map works.
+3. Back to the start line when a pass applies. The craft is currently re-seated where it was, deliberately, by
+   `reseatAfterConfigSwap`; the owner wants the opposite, and they are right, because a pass flown from the same place
+   as the last one is the comparison the loop is making.
+4. A feedback dialog thirty seconds after that.
+
+### What the exploration found, so the next session does not re-derive it
+
+Two mechanisms already exist and both are better than what was planned for them.
+
+**Back to the start is `reset()`, src/main.js:4430, wrapped in `whenConfigReady`.** It runs `adoptSpawn`, zeroes
+`simTimeMs`, calls `resetCraft(null)` and `race.reset()`, and clears `landed` and `launchStaging`. R and the radio's
+restart switch both call it mid flight, so mid flight is safe. The `fly` and `restart` actions (around 6615) wrap it in
+`whenConfigReady(...)`, which defers until a tune or config load has finished, and applying a rate pass IS a `sim_init`,
+so the pass path has to use the same wrapper rather than calling `reset()` straight. A lap in progress is lost, which
+for this feature is wanted. Note it also re-latches `runVoltage` from the setting: every pass would start on a fresh
+pack, which is arguably right for comparability and should be a deliberate decision rather than a surprise.
+
+**The feedback dialog already exists and should not be rebuilt.** `askFeelReport(context)` at src/ui/ui.js:7129 is a
+hand built "how does it feel" dialog with feel chips (Floppy, Soft, About right, Stiff, Twitchy), issue chips
+(sluggish, bounce, propwash, drift, yaw, throttle, floaty, locked), free text and a throttle shortcut. `openFeelReport()`
+at 7117 is the entry point, `feelSnapshot()` at 7066 builds its context, and it submits through `submitBug` to the
+board's `/api/bugs` with `kind: 'feel'`. `maybeOfferFeel()` at 7086 is an existing automatic offer, fired once ever on
+the second results screen and never after a pad input.
+
+So part 4 is "call the existing feel report thirty seconds after a pass lands, with the pass in its context", not a new
+dialog. Two things to settle when it is written: `openFeelReport` sets `settings.feelAsked` and `maybeOfferFeel` fires
+only while that is unset, so a tuning run would silently consume the one automatic offer a pilot ever gets; and
+`askForm` is text fields only, so anything richer than the existing chips would have to be hand built the way
+`askFeelReport` already is.
+
+Also worth knowing: `askForm` returns a promise of an object keyed by field, or null on cancel, Escape or a backdrop
+click; `askConfirm` returns a promise of a boolean and ignores input for `CONFIRM_DEAF_MS` after opening; and all of
+them share the one `this.nameDialog` overlay, so two cannot be open at once.
+
+### The leading hypothesis for the hang, untested
+
+`src/fresh.js` carries a manifest of every served file, 255 of them. `scripts/gen-preload.js` builds it by walking the
+boot, city and built graphs, and `src/maps/ratelab.js` is reachable from none of those: it is a new lazy map module. So
+the regeneration run in this entry picked up `src/fc/ratemyrates.js` and `src/share/supportprompt.js` and did NOT pick
+up the map module, which was being served while absent from the manifest.
+
+That is the same shape as the three touchpoints already found: a new map needs a line in the registry, a key in
+`build-cost.js`, a flag past `main.js`'s track adoption, and apparently a place in the freshness manifest, which means
+teaching the generator about a fourth graph. It would also explain why two runs disagreed, since a cache is exactly the
+kind of thing that makes a load fail intermittently.
+
+Untested. Written down as the first thing to try rather than as a finding.
+
+### Still open
+
+- A pass is 25 seconds of stick movement, which is a guess. Too short and a pass measures noise, too long and nothing
+  appears to be happening. Worth a pilot's opinion.
+- The convergence bands, six percent and six points of expo, are the same kind of guess.
+- The whoop still is not offered, and nothing in the fit is five inch specific.
+- Flight feel is unverified and cannot be verified from here. Whether a settled profile is a profile worth flying is a
+  pilot's judgement, and the owner has offered to fly it.

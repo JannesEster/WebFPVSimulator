@@ -86,11 +86,14 @@ import {
   profileForType,
   rateField,
   ratesAreDefault,
+  ratesDiff,
   ratesFromLegacy,
   ratesShort,
   ratesSummary,
   throttleSummary,
 } from '../../configs/rates.js';
+import { angleRateDeg } from '../fc/ratescurve.js';
+import { SESSION_GOOD_S, SESSION_THIN_S } from '../fc/ratemyrates.js';
 import {
   PRESET_NAME_MAX,
   RATES_STORAGE_WARNING,
@@ -344,6 +347,7 @@ const SCREEN_TITLES = {
   launch: 'Before you fly',
   standings: 'Standings',
   rates: 'Rates',
+  ratemyrates: 'Rate my Rates',
   pids: 'Tune',
   fc: 'Firmware bench',
   paused: 'Paused',
@@ -370,6 +374,7 @@ const CRUMBS = {
   launch: ['Before you fly'],
   standings: ['Tracks', 'Standings'],
   rates: ['Settings', 'Rates'],
+  ratemyrates: ['Rate my Rates'],
   pids: ['Quad', 'Tune'],
   fc: ['Quad', 'Firmware bench'],
   paused: ['Paused'],
@@ -4225,6 +4230,41 @@ const WAYS = [
      * hidden and these are the whole of the card. */
     facts: ['No gates', 'No clock', 'Build a map'],
   },
+  /*
+   * THE FOURTH WAY IN, WHICH FLIES IN ORDER TO MEASURE.
+   *
+   * It is in WAYS rather than beside them because it IS a way: it seats an
+   * aircraft, it sets a mode, and it lands the pilot in a flight. The only
+   * thing that distinguishes it is that something is watching, which is
+   * what `measure` says, and the one place that matters is seatedWay: the
+   * cursor must never OPEN on this card. A pilot arriving to fly is
+   * arriving to fly, and a tuning utility sitting under the cursor on every
+   * visit would be the front door answering a question nobody asked.
+   *
+   * FREESTYLE, AND DELIBERATELY NO EXERCISES. The measurement wants natural
+   * flying, so the mode is the one with no gates and no clock and the pilot
+   * is asked for nothing at all. That is not a shortcut, it is the design:
+   * a set of drills would measure how well somebody performs drills, and
+   * what the fit needs is how they actually fly. It is also the only
+   * honest position available, since calibration exercise designs are
+   * exactly what WILDTYPE's RateFinder licence reserves and this feature is
+   * clean room of it. See src/fc/ratemyrates.js.
+   *
+   * THE MAP IS NOT OVERRIDDEN. Whatever freestyle world is seated is where
+   * this flies, because the fit does not care where it happens and a card
+   * that moved a pilot's world would be a surprise in exchange for
+   * nothing.
+   */
+  {
+    id: 'ratemyrates',
+    airframe: '5inch',
+    mode: 'freestyle',
+    measure: true,
+    label: 'Rate my Rates',
+    art: 'assets/gate/ratemyrates.jpg',
+    blurb: 'Fly how you normally fly and this reads your hands: how big your corrections are, how hard you commit, how fast the quad actually turned. Then it says what rate profile that asks for, and why, in your own numbers.',
+    facts: ['No drills', 'Reads your sticks', 'One minute'],
+  },
 ].map((w) => ({ ...w, action: `way-${w.id}` }));
 
 /*
@@ -4256,10 +4296,60 @@ const BUILDER_CARD = {
  * on and what a menu that has been backed out of returns to. The mode is
  * only set once the gate has been answered, so before that the racing card
  * of the seated aircraft is the standing answer. */
+/*
+ * The title's Rate my Rates row, in words.
+ *
+ * Four states and they are genuinely different things to say: watching but
+ * nothing flown yet, a pass in progress, a run that finished, and a run
+ * that finished after the pilot left the mode, which is the one where the
+ * row is only still there so the undo is reachable.
+ */
+function rateRowValue(measuring, read) {
+  if (!read) {
+    return 'Fly first';
+  }
+  if (read.state === 'done') {
+    return read.why === 'settled' ? 'Settled' : 'Stopped';
+  }
+  if (!measuring) {
+    return `${read.passes.length} pass${read.passes.length === 1 ? '' : 'es'}`;
+  }
+  return read.moveSeconds > 0 ? `Pass ${read.pass}, ${Math.round(read.passProgress * 100)}%` : 'Fly first';
+}
+
+function rateRowNote(measuring, read) {
+  if (!read || (!read.passes.length && !(read.moveSeconds > 0))) {
+    return 'Watching, and nothing measured yet. Fly how you normally fly: hover and hold a line, '
+      + 'then commit to some real moves. It refines your rates a pass at a time as you go.';
+  }
+  if (read.state === 'done') {
+    return read.why === 'settled'
+      ? `It settled after ${read.passes.length} passes and you are flying what it found. Open it for `
+        + 'the numbers, why each one moved, and the row that puts back what you arrived on.'
+      : `It stopped after ${read.passes.length} passes without settling. Open it for what it found, `
+        + 'why it stopped, and the row that puts back what you arrived on.';
+  }
+  if (!measuring) {
+    return `${read.passes.length} pass${read.passes.length === 1 ? '' : 'es'} moved your rates before `
+      + 'you left the mode. This row stays so you can still see what it did and put back what you '
+      + 'arrived on.';
+  }
+  return `Pass ${read.pass} of up to ${read.passLimit}, ${read.moveSeconds.toFixed(0)} seconds of stick `
+    + 'movement in. When it fills your rates change and the next pass measures those.';
+}
+
+/* The ways a pilot can be SEATED on, which is every way that is not a
+ * measuring one: see the `measure` note in WAYS for why the cursor must
+ * never open on that card. */
+function flyableWays() {
+  return WAYS.filter((w) => !w.measure);
+}
+
 function seatedWay(settings, mode) {
-  return WAYS.find((w) => w.airframe === settings.airframe && w.mode === (mode || 'race'))
-    || WAYS.find((w) => w.airframe === settings.airframe)
-    || WAYS[0];
+  const ways = flyableWays();
+  return ways.find((w) => w.airframe === settings.airframe && w.mode === (mode || 'race'))
+    || ways.find((w) => w.airframe === settings.airframe)
+    || ways[0];
 }
 
 /*
@@ -4342,6 +4432,15 @@ export class Ui {
      * what onGate() says, so a link has to answer both to skip it.
      */
     this.mode = linkedMode();
+    /*
+     * Whether this session is being measured for a rate proposal: see the
+     * Rate my Rates card in WAYS and the room of the same name. Off until
+     * that card is pressed, and off again the moment another one is.
+     */
+    this.measuring = false;
+    /* What main.js has measured so far, as a function, for the same reason
+     * the stick path is one: see setStickProbe. */
+    this.rateProbe = null;
     /*
      * WHICH AIRCRAFT, the other half.
      *
@@ -5434,6 +5533,50 @@ export class Ui {
     ratesBlock.stage.prepend(this.ratesPanel.root);
     rates.append(ratesBlock.stage);
     this.screens.rates = rates;
+
+    /*
+     * RATE MY RATES: what the session measured, and what it asks for.
+     *
+     * WHY IT IS ITS OWN SCREEN AND NOT A SECTION OF THE ONE ABOVE. Rates is
+     * a room where every row writes to the quad. Every row here is a
+     * MEASUREMENT, and nothing in it is editable: a reading a pilot could
+     * type over would not be a reading. Putting the two in one room would
+     * put editable and read-only rows in one list, and the pilot's only clue
+     * about which was which would be that some of them refuse the arrows.
+     *
+     * It wears screen-pilot's plain page styling rather than Rates' own,
+     * because Rates' layout exists to seat the curve panel in its first
+     * column and this room has no panel. The curve belongs on the screen
+     * where the numbers can be changed, which is where Take these rates
+     * hands over to.
+     *
+     * NO HOST, NO ROWS, and that is why this block exists at all. The first
+     * version of this feature added the screen id, its title, its crumb, its
+     * rows and its actions, and skipped this: renderMenu looks the screen up
+     * in a map of DOM hosts, found nothing, and drew the room's crumb and
+     * its command bar over an empty page. Everything worked except that the
+     * room was blank. A screen is four things and this is the fourth.
+     */
+    const rmr = el('div', 'screen screen-page screen-pilot screen-ratemyrates');
+    rmr.append(el('h2', null, SCREEN_TITLES.ratemyrates));
+    rmr.append(el(
+      'p',
+      'rates-lede',
+      /*
+       * THIS LINE USED TO SAY "nothing here changes the quad until you take
+       * it", which was true of the one shot version and became a lie the
+       * moment the loop applied its own passes. A screen that misdescribes
+       * what it is doing to the quad is worse than a screen that says
+       * nothing, so it says what actually happens and where the undo is.
+       */
+      'It refines your rates as you fly, a pass at a time. You can put back what you arrived on.',
+    ));
+    const rmrBlock = wrapMenu();
+    this.rateMyRatesMenu = rmrBlock.menu;
+    this.rateMyRatesMenu.classList.add('menu-scroll');
+    this.rateMyRatesHelp = rmrBlock.help;
+    rmr.append(rmrBlock.stage);
+    this.screens.ratemyrates = rmr;
 
     /*
      * PIDs.
@@ -7506,10 +7649,50 @@ export class Ui {
               : 'Before you fly first: the laps, the pack and what this run counts as, then the grid. Once per track each visit.')
             : undefined,
         };
+      /*
+       * THE WAY BACK INTO THE MEASUREMENT, and it is only here while there
+       * is one.
+       *
+       * A pilot who pressed Rate my Rates, flew, and hit Escape lands on
+       * this screen, and the result of what they just did has to be ON it.
+       * Without this row the room would be reachable only by pressing the
+       * card again, which starts a fresh session and throws the flight away:
+       * the one gesture that looks like "show me the answer" would be the
+       * one that destroys it.
+       *
+       * Off the list when nothing is being measured, because a row that
+       * opens a room saying "nothing measured yet" is furniture. The card on
+       * the gate is the way in from cold.
+       */
+      /*
+       * ON THE LIST WHILE A RUN IS LIVE, AND WHILE ONE HAS LEFT A MARK.
+       *
+       * The second half is a trap being closed rather than a nicety. The row
+       * used to appear only while `measuring`, which goes false the instant
+       * any other card on the gate is pressed. So: run the loop, let it move
+       * your rates across three passes, then press Freestyle because you
+       * want to go flying. The row vanishes, and with it the only door to
+       * the room, and the only way back to the profile you arrived on. The
+       * pilot is left on rates they did not choose with no way to undo them.
+       *
+       * So it also shows while the run has passes behind it, whether or not
+       * the mode is still armed, because the undo has to outlive the mode.
+       */
+      const measured = this.rateProbe ? this.rateProbe() : null;
+      const ranSomething = Boolean(measured && measured.passes && measured.passes.length);
+      const rateRow = (this.measuring || ranSomething)
+        ? [{
+          label: SCREEN_TITLES.ratemyrates,
+          value: rateRowValue(this.measuring, measured),
+          action: 'ratemyrates',
+          note: rateRowNote(this.measuring, measured),
+        }]
+        : [];
       return [
         ...(trouble ? [trouble] : []),
         flyRow,
         modeRow,
+        ...rateRow,
         /*
          * THE TRICK LIST IS WITHDRAWN UNTIL THE SCORING IS SETTLED.
          *
@@ -8835,6 +9018,197 @@ export class Ui {
         { label: 'Back to title', action: 'title' },
       ];
     }
+    /*
+     * THE RATE MY RATES ROOM: what the session measured, what it proposes,
+     * and one row to fly it.
+     *
+     * READ ONLY ROWS AND TWO VERBS, which is the shape this room has to
+     * have. Every number here is a measurement, so none of it is editable:
+     * a row a pilot could type into would be a measurement they had
+     * overwritten. What they CAN do is take the proposal, which hands them
+     * straight to the Rates screen's rows, where every number is editable
+     * and the curve is drawn. So this room measures and argues, and the
+     * room that already owns rate profiles is the one that holds them.
+     *
+     * NOTHING IS APPLIED WITHOUT BEING ASKED. A mode that silently changed
+     * the quad under a pilot would be the single worst thing this feature
+     * could do, so the proposal sits here until Take these rates is pressed
+     * and the quad is flying whatever it was flying until then.
+     */
+    if (this.screen === 'ratemyrates') {
+      const read = this.rateProbe ? this.rateProbe() : null;
+      const back = { label: 'Back', action: 'back' };
+      if (!read || (!read.armed && read.passes.length === 0)) {
+        return [
+          {
+            label: 'Nothing measured yet',
+            value: '',
+            info: true,
+            note: 'This room reads a Rate my Rates session. Press Rate my Rates on the front screen '
+              + 'and fly how you normally fly, and it refines your rates as you go.',
+          },
+          {
+            label: 'Start a session',
+            action: 'ratemyrates-start',
+            primary: true,
+            note: 'Seats the five inch, puts you in a freestyle world with no gates and no clock, '
+              + 'and starts watching. No drills: fly whatever you fly.',
+          },
+          back,
+        ];
+      }
+      const done = read.state === 'done';
+      /*
+       * THE PASS TABLE, which is the whole story of the run in one column.
+       *
+       * A pilot who is handed a final profile and nothing else has no way to
+       * tell a loop that converged from a loop that gave up, and those two
+       * want opposite things from them. So every pass is a row: what it set,
+       * how much it moved, and whether its proposal was refused for drifting
+       * too far from where they started.
+       */
+      const passRows = read.passes.map((p) => ({
+        label: `Pass ${p.pass}`,
+        value: ratesShort(p.rates).replace(/^Actual /, ''),
+        info: true,
+        note: p.refused
+          ? `This pass wanted ${ratesShort(p.wanted)} and was refused: one run may not drag your `
+            + 'profile that far from where it started. You kept the pass before it. Fly these and '
+            + 'start again, and the next run measures from here and goes further.'
+          : `${p.moveSeconds.toFixed(0)} seconds of stick movement, and it moved your profile by `
+            + `${Math.round(p.moved.frac * 100)} percent.${p.settled ? ' This is where it stopped moving.' : ''}`,
+      }));
+
+      /*
+       * WHAT IS HAPPENING RIGHT NOW. Either a pass in progress, with how far
+       * through it is and where it is currently heading, or the verdict.
+       *
+       * The live reading is labelled as incomplete rather than hidden. A
+       * screen that said nothing until a pass filled would leave a pilot who
+       * had just flown twenty seconds looking at a stale number with no sign
+       * that anything was being measured at all.
+       */
+      const live = read.live;
+      /*
+       * A RUN THAT WAS WALKED AWAY FROM is neither finished nor in
+       * progress, and saying either would be wrong. The pilot pressed
+       * another card on the gate, so nothing is being measured, but the
+       * passes that already landed are still on their quad and the undo is
+       * still the thing they are most likely here for.
+       */
+      const left = !read.armed && !done;
+      const headRow = left
+        ? {
+          label: 'Run left unfinished',
+          value: `${read.passes.length} pass${read.passes.length === 1 ? '' : 'es'}`,
+          info: true,
+          note: 'You left the mode, so nothing is being measured now. What the passes below set is '
+            + 'still what you are flying. Start a session to carry on from here, or put back what '
+            + 'you arrived on.',
+        }
+        : (done
+          ? {
+          label: read.why === 'settled' ? 'Settled' : 'Stopped',
+          value: ratesShort(read.rates),
+          info: true,
+          note: read.why === 'settled'
+            ? `It stopped moving after ${read.passes.length} passes, which means these rates fit how `
+              + 'you fly. Fly them. If they feel wrong somewhere specific, the Rates screen has every '
+              + 'number and the curve.'
+            : (read.why === 'drift'
+              ? 'It wanted to move your profile further from where you started than one run is '
+                + 'allowed to, so it stopped and kept the last profile inside that limit. That '
+                + 'usually means you are asking for a lot more rate than you had. Fly these, then '
+                + 'run it again: the next run measures from here.'
+              : `It used all ${read.passLimit} passes and was still moving, so it stopped rather than `
+                + 'guessing. Fly these and run it again to carry on from here.'),
+        }
+        : {
+          label: `Pass ${read.pass} of up to ${read.passLimit}`,
+          value: `${Math.round(read.passProgress * 100)}%`,
+          info: true,
+          note: read.moveSeconds > 0
+            ? `${read.moveSeconds.toFixed(0)} seconds of stick movement so far. A pass fills on stick `
+              + 'movement rather than on the clock, so time parked on the ground costs you nothing. '
+              + 'When it fills, your rates change and the next pass measures those.'
+            : 'Watching, and nothing measured yet. Fly: hover and hold a line, then commit to some '
+              + 'real moves. A pass fills on stick movement, so parked time costs you nothing.',
+        });
+
+      const axisRow = (axis, label, from) => ({
+        label,
+        value: `${Math.round(angleRateDeg('ACTUAL', {
+          rcRate: from[axis].rcRate,
+          srate: from[axis].srate,
+          expo: from[axis].expo,
+          quickRcExpo: false,
+        }, 1))} deg/s`,
+        info: true,
+        note: (live ? live.notes : null)?.[axis] ?? 'Measured on the passes above.',
+      });
+      const shown = live ? live.rates : read.rates;
+
+      return [
+        headRow,
+        {
+          label: 'Flying now',
+          value: ratesShort(s.rates),
+          info: true,
+          note: `You arrived on ${ratesShort(read.opening)}.`
+            + (ratesDiff(read.opening) === ratesDiff(s.rates)
+              ? ' Nothing has changed yet.'
+              : ` This run has moved you by ${Math.round(read.drift.frac * 100)} percent, and the row `
+                + 'below puts you back if you want it.'),
+        },
+        ...(read.passes.length ? [{ label: 'Every pass', section: true }, ...passRows] : []),
+        ...(live && !done && !left
+          ? [
+            {
+              label: 'Pass so far', section: true,
+            },
+            {
+              label: 'Heading toward',
+              value: ratesShort(live.rates),
+              info: true,
+              note: 'An incomplete pass, so this is not the answer yet: it is what this pass would '
+                + `set if it ended now, ${Math.round(live.moved.frac * 100)} percent from what you are `
+                + 'flying. Keep flying and it settles.',
+            },
+            axisRow('roll', 'Roll', shown),
+            axisRow('pitch', 'Pitch', shown),
+            axisRow('yaw', 'Yaw', shown),
+          ]
+          : []),
+        { label: 'Then what', section: true },
+        /* Offered when the run is over AND when it was walked away from,
+         * because the head row in that state tells the pilot to start one
+         * and an instruction with no row under it is worse than silence. */
+        ...(done || left
+          ? [{
+            label: left ? 'Start a session' : 'Run it again',
+            action: 'ratemyrates-start',
+            primary: true,
+            note: left
+              ? 'Puts you back in a freestyle world and starts a fresh run from what you are flying '
+                + 'now, which is where the passes above left you.'
+              : 'Starts a fresh run from what you are flying now. Worth doing if this one stopped '
+                + 'rather than settled, and worth doing again in a month: your hands change.',
+          }]
+          : []),
+        {
+          label: 'Put my old rates back',
+          action: 'ratemyrates-restore',
+          disabled: ratesDiff(read.opening) === ratesDiff(s.rates),
+          rowClass: ratesDiff(read.opening) === ratesDiff(s.rates) ? 'row-grey' : undefined,
+          note: ratesDiff(read.opening) === ratesDiff(s.rates)
+            ? `Nothing to put back: you are flying ${ratesShort(read.opening)}, which is what you `
+              + 'arrived on.'
+            : `Back to ${ratesShort(read.opening)}, the profile you arrived on, and this run is `
+              + 'forgotten. Nothing about a measured run is permanent until you decide it is.',
+        },
+        back,
+      ];
+    }
     if (this.screen === 'rates') {
       /*
        * BETAFLIGHT CONFIGURATOR'S RATES TAB, in a menu.
@@ -9261,6 +9635,7 @@ export class Ui {
       launch: this.launchMenu,
       standings: this.standingsMenu,
       rates: this.ratesMenu,
+      ratemyrates: this.rateMyRatesMenu,
       pids: this.pidsMenu,
       fc: this.fcMenu,
       paused: this.pausedMenu,
@@ -9677,6 +10052,7 @@ export class Ui {
       launch: this.launchHelp,
       standings: this.standingsHelp,
       rates: this.ratesHelp,
+      ratemyrates: this.rateMyRatesHelp,
       pids: this.pidsHelp,
       fc: this.fcHelp,
       paused: this.pausedHelp,
@@ -15272,6 +15648,23 @@ export class Ui {
   }
 
   /*
+   * WHAT THE SESSION HAS MEASURED, read when the room is opened.
+   *
+   * A function rather than a value, and for a stronger reason than the
+   * stick path's: this one changes on every frame the pilot flies. A
+   * snapshot handed over at any particular moment would be the session as
+   * it was then, and the room exists to be opened after a flight. main.js
+   * owns the accumulator because main.js owns the frame loop; this is how
+   * the room asks it what it has.
+   *
+   * The probe answers { seconds, moveSeconds, stats, fit } or null when
+   * nothing has been measured.
+   */
+  setRateProbe(fn) {
+    this.rateProbe = typeof fn === 'function' ? fn : null;
+  }
+
+  /*
    * ONE ROW ON THE RATES SCREEN SAYING HOW YOUR STICKS REACH THE QUAD.
    *
    * src/main.js explains at length why the performance readout was taken out
@@ -16696,6 +17089,15 @@ export class Ui {
       this.settings.airframeAsked = true;
       this.craftGate = false;
       this.mode = way.mode;
+      /*
+       * WHETHER SOMETHING IS WATCHING THIS SESSION, set by every way rather
+       * than only by the one that turns it on, so choosing any other card
+       * turns it off. Not in the settings blob and deliberately not
+       * remembered, for the same reason `mode` is not: it is what this
+       * session is for. src/main.js watches it and resets its accumulator on
+       * the edge, so pressing the card is what starts a fresh measurement.
+       */
+      this.measuring = Boolean(way.measure);
       saveSettings(this.settings);
       /* The shell has to hear this before anything is flown: it is the
        * call that swaps the plant in the compiled module and reloads the
@@ -16867,6 +17269,47 @@ export class Ui {
       if (this.onAction) {
         this.onAction('fly', this.settings);
       }
+      return;
+    }
+    if (action === 'ratemyrates') {
+      this.returnTo = this.screen === 'paused' ? 'paused' : 'title';
+      this.show('ratemyrates');
+      return;
+    }
+    /*
+     * START, OR START AGAIN. Both go through the card's own action, so there
+     * is exactly one piece of code that decides what a Rate my Rates session
+     * is: the aircraft it seats, the mode it sets, and the flag main.js
+     * watches. A second copy here would be the two drifting apart.
+     */
+    if (action === 'ratemyrates-start') {
+      this.act('way-ratemyrates');
+      return;
+    }
+    /*
+     * PUT BACK THE PROFILE THE PILOT ARRIVED ON.
+     *
+     * The loop applies each pass itself, which is what makes it a loop, so
+     * the thing the pilot needs is not a Take button but an undo. Nothing
+     * about a measured run is permanent until they decide it is, and this is
+     * where they decide it was not.
+     *
+     * The coach keeps the opening profile for the whole run, so this is the
+     * profile they arrived on and not the previous pass's. Halfway back is
+     * not a place anybody asked to be.
+     */
+    if (action === 'ratemyrates-restore') {
+      const read = this.rateProbe ? this.rateProbe() : null;
+      if (!read || !read.opening) {
+        return;
+      }
+      this.settings.rates = normaliseRates(read.opening);
+      this.settings.ratesSplitPitch = !pitchMatchesRoll(this.settings.rates);
+      saveSettings(this.settings);
+      if (this.onSettings) {
+        this.onSettings(this.settings);
+      }
+      this.renderMenu();
       return;
     }
     if (action === 'rates') {
