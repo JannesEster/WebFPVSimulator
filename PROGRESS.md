@@ -67660,6 +67660,73 @@ kind of thing that makes a load fail intermittently.
 
 Untested. Written down as the first thing to try rather than as a finding.
 
+## 2026-10-06 | contribution | Cut onto the upstream main, and every edit put under a test
+
+### The ask
+
+The upstream owner, Mathew Harvey, on the fork this work was done in: branch from HIS main rather than from the fork's,
+open the pull request against his repository, "and if that is the case, please ensure any edits you make are covered by
+unit tests".
+
+### The branch
+
+`upstream` added as a remote and fetched. `git merge-base HEAD upstream/main` returns `2e34c05`, a real common
+ancestor, so the histories are related and CLAUDE.md's stop condition does not apply. `upstream/main` was 17 commits
+ahead of the fork's `main` with the fork holding nothing of its own: stale rather than diverged.
+
+**Merged rather than rebased, and that was a judgement.** Five files overlap (PROGRESS.md, `src/main.js`,
+`src/ui/ui.js`, `scripts/input-check.js`, `src/fresh.js`) and PROGRESS.md was always going to conflict because both
+sides append. A rebase would have asked for the same resolution up to seventeen times, once per commit, each one a
+chance to drop somebody's entry. One merge is one resolution and rewrites none of the seventeen commits. Only
+PROGRESS.md actually conflicted; the four code files auto-merged and every check was green afterwards.
+
+The fork's `main` has deliberately NOT been moved. Fast forwarding it to `upstream/main` would be append only and safe,
+but it was not asked for, and a branch nobody requested moving is a branch that should not move.
+
+### Every edit, and what covers it
+
+The owner's condition is the useful kind, so it is answered as a table rather than as a claim.
+
+| What changed | What covers it |
+| --- | --- |
+| `src/fc/ratemyrates.js`, the accumulator, the fit and the coach | `npm run check:ratemyrates`, 89 checks, no browser, mutation tested four ways |
+| `src/fc/ratemyrates.js`, the four run states and their wording | the same suite, 15 of those checks |
+| `tracks/json/ratelab.json` and its generator | `npm run check:ratelab`, 28 checks |
+| `src/main.js`, applying a pass and the probe | `npm run check:ratepass`, the real shell, mutation tested |
+| `src/ui/ui.js`, the room's rows and its two actions | `npm run check:rateroom`, the real shell, mutation tested |
+| `src/ui/ui.js`, the gate's fifth card | `scripts/shell-check.js` and `scripts/input-check.js` pin the card list; proved to bite by running this branch's UI against the old assertions |
+| `src/ui/ui.js`, the room as a screen | `npm run lint:shell` walks it: 3 stops, 3 reached by arrow, 0 px overflow, 0 px below the fold |
+| `src/fresh.js` | `npm run lint:preload` |
+
+`npm run check:rates` runs all four of the new suites in one command, which is what a reviewer wants rather than four
+things to remember.
+
+**Nothing was added to `tests/`.** That directory is the physics harness, and the repository's own
+`.claude/skills/verify-flight-model/SKILL.md` lists editing anything under it as invalidating a verification run. The
+house pattern for everything that is not the flight model is `scripts/*-check.js` with an `npm run` entry, which is
+what the forty odd existing `lint:*` and `check:*` scripts are, and what these are.
+
+### What answering the condition changed in the code
+
+Two functions could not be tested where they were: the title row's value and its note sat unexported in the middle of
+`src/ui/ui.js`, and the room worked the same four states out a SECOND time from `read.state` and `read.armed`. So
+`passState`, `passRowValue` and `passRowNote` moved into `src/fc/ratemyrates.js`, which is where this repository already
+keeps pilot-facing display strings for a domain concept: `ratesSummary`, `ratesShort` and `throttleSummary` all live
+beside the rate profile they describe in `configs/rates.js`. The room and the title row now read one definition.
+
+That is a refactor the tests paid for rather than a refactor for its own sake, and writing the tests immediately found
+a fifth state bug: **a run abandoned inside its first pass has applied nothing**, so there is no trace of it on the quad
+and nothing to undo, and reading it as `left` put "Run left unfinished, 0 passes" on screen above a note promising
+passes below it that did not exist. It is `cold` now.
+
+### What went wrong
+
+- Two of `rateroom-check.js`'s own assertions were loose before they were right, and both are recorded where they were
+  wrong. A regex does not survive being a string through a shell and then through `Runtime.evaluate`, so `/^Pass \d+$/`
+  arrived as the literal characters backslash and d. Then `startsWith('Pass ')` counted three rows rather than two,
+  because a run in progress heads the room with "Pass 3 of up to 6". Both were the check being imprecise and neither
+  was the room being wrong, which is the right way round but only because they were chased rather than loosened.
+
 ### Still open
 
 - A pass is 25 seconds of stick movement, which is a guess. Too short and a pass measures noise, too long and nothing
