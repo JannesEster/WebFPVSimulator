@@ -66907,8 +66907,50 @@ committed and good; `src/maps/ratelab.js` is in this entry's history only.
 3. Back to the start line when a pass applies. The craft is currently re-seated where it was, deliberately, by
    `reseatAfterConfigSwap`; the owner wants the opposite, and they are right, because a pass flown from the same place
    as the last one is the comparison the loop is making.
-4. A feedback dialog thirty seconds after that, which wants `askForm` and probably belongs beside the existing feel
-   report in `src/share/bugs.js` rather than as a new kind of thing.
+4. A feedback dialog thirty seconds after that.
+
+### What the exploration found, so the next session does not re-derive it
+
+Two mechanisms already exist and both are better than what was planned for them.
+
+**Back to the start is `reset()`, src/main.js:4430, wrapped in `whenConfigReady`.** It runs `adoptSpawn`, zeroes
+`simTimeMs`, calls `resetCraft(null)` and `race.reset()`, and clears `landed` and `launchStaging`. R and the radio's
+restart switch both call it mid flight, so mid flight is safe. The `fly` and `restart` actions (around 6615) wrap it in
+`whenConfigReady(...)`, which defers until a tune or config load has finished, and applying a rate pass IS a `sim_init`,
+so the pass path has to use the same wrapper rather than calling `reset()` straight. A lap in progress is lost, which
+for this feature is wanted. Note it also re-latches `runVoltage` from the setting: every pass would start on a fresh
+pack, which is arguably right for comparability and should be a deliberate decision rather than a surprise.
+
+**The feedback dialog already exists and should not be rebuilt.** `askFeelReport(context)` at src/ui/ui.js:7129 is a
+hand built "how does it feel" dialog with feel chips (Floppy, Soft, About right, Stiff, Twitchy), issue chips
+(sluggish, bounce, propwash, drift, yaw, throttle, floaty, locked), free text and a throttle shortcut. `openFeelReport()`
+at 7117 is the entry point, `feelSnapshot()` at 7066 builds its context, and it submits through `submitBug` to the
+board's `/api/bugs` with `kind: 'feel'`. `maybeOfferFeel()` at 7086 is an existing automatic offer, fired once ever on
+the second results screen and never after a pad input.
+
+So part 4 is "call the existing feel report thirty seconds after a pass lands, with the pass in its context", not a new
+dialog. Two things to settle when it is written: `openFeelReport` sets `settings.feelAsked` and `maybeOfferFeel` fires
+only while that is unset, so a tuning run would silently consume the one automatic offer a pilot ever gets; and
+`askForm` is text fields only, so anything richer than the existing chips would have to be hand built the way
+`askFeelReport` already is.
+
+Also worth knowing: `askForm` returns a promise of an object keyed by field, or null on cancel, Escape or a backdrop
+click; `askConfirm` returns a promise of a boolean and ignores input for `CONFIRM_DEAF_MS` after opening; and all of
+them share the one `this.nameDialog` overlay, so two cannot be open at once.
+
+### The leading hypothesis for the hang, untested
+
+`src/fresh.js` carries a manifest of every served file, 255 of them. `scripts/gen-preload.js` builds it by walking the
+boot, city and built graphs, and `src/maps/ratelab.js` is reachable from none of those: it is a new lazy map module. So
+the regeneration run in this entry picked up `src/fc/ratemyrates.js` and `src/share/supportprompt.js` and did NOT pick
+up the map module, which was being served while absent from the manifest.
+
+That is the same shape as the three touchpoints already found: a new map needs a line in the registry, a key in
+`build-cost.js`, a flag past `main.js`'s track adoption, and apparently a place in the freshness manifest, which means
+teaching the generator about a fourth graph. It would also explain why two runs disagreed, since a cache is exactly the
+kind of thing that makes a load fail intermittently.
+
+Untested. Written down as the first thing to try rather than as a finding.
 
 ### Still open
 
