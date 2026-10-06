@@ -1,71 +1,41 @@
 /*
  * ratelab-track.js: generate the Rate Lab, the track Rate my Rates flies.
  *
- * WHY A TRACK AT ALL. The first version of Rate my Rates measured a
- * freestyle session, on the reasoning that natural flying is what the fit
- * wants. The owner flew it and reported the hole in that: "trying to tune
- * rates in freestyle gives most people no structure". They are right, and
- * the reason is worse than comfort. The fit compares each pass against the
- * last, so two passes are only comparable if they measured the same KIND of
- * flying. A pilot who hovered through pass one and chased rooftops through
- * pass two has handed the loop two different pilots, and the loop cannot
- * tell that from a pilot whose hands changed.
+ * THE ORDER, as asked: a first gate, a slalom of flags, a triple stack up
+ * and then one down, a triple stack corkscrewing up, then split-S gates.
  *
- * A track fixes it by construction. Every lap asks for the same inputs in
- * the same order, so pass two differs from pass one because the RATES
- * changed and for no other reason.
+ * THE LINE IS NOT INVENTED. Each of those shapes is already flown on the
+ * public board, and the fastest ghost on that track is a position trace at
+ * 30 Hz with a split on every gate. scripts/line-from-ghosts.js reads it.
+ * What was copied here is the layout those laps were flown on, not a spline
+ * guessed through gate centres:
  *
- * WHY IT IS GENERATED AND NOT DRAWN. The track is a measuring instrument,
- * so its properties have to be exact rather than approximately what somebody
- * dragged into place, and they are produced by functions rather than by
- * arithmetic done twice: `mirrorX` and `mirrorYaw` below. A pilot who is
- * smoother one way round than the other is then reading their own hands
- * rather than the track's bias, and that claim is worth something only if
- * nobody can typo it.
+ *   Slalom. "So long, Schlalom!" (trk-c0600456), AsylumFPV, 27.80 s, the
+ *   best of 6 ghosts. Flags sit 2 m off the lane, clearance 1.5 m, and the
+ *   early weave stays inside about 1.5 m of the straight. Spacing is the
+ *   10 to 12 m chord of "Flags and cones" (trk-2397fd92), Alexulfer, 6.01 s,
+ *   the best of 66 ghosts. The 14 to 16 m pitch of the long slalom does not
+ *   fit a field a lap can close on.
  *
- * WHAT IS AND IS NOT SYMMETRIC, stated carefully because the first version
- * of this comment overclaimed and scripts/ratelab-check.js caught it.
+ *   Triple up, then down. "ladder-up, ladder-down" (trk-66483691), Asylum
+ *   Fpv, 9.13 s. Two three-level ladders, the first flown bottom middle top
+ *   all from the same face, the second top middle bottom the same way. The
+ *   ghost wraps about 3.6 m out while it climbs from under 1 m to about 5 m.
+ *   The stacks stand 9 m apart on that track; 12 m here keeps the two wraps
+ *   from meeting.
  *
- *   The HAIRPINS are exact reflections about the centre line. This is the
- *   one that was asked for and the one that matters: an unequal pair would
- *   bias every profile this track ever produced toward one hand.
+ *   Corkscrew up. The same same-face climb, which is the spiral the builder
+ *   calls a corkscrew: each hole, then around the side, then the next hole
+ *   from the same face. "Corkscrew" (trk-b3583898), AsylumFPV, 19.09 s, is
+ *   the flown version of that orbit: single gates 2 m apart, and the ghost
+ *   loops about 3 m out with a height change of about 4 m a gate.
  *
- *   The LADDERS are exact reflections in position and heading, one flown
- *   upward and one flown downward.
+ *   Split-S. "Immelman Turn / Hammerhead" (trk-efee501b), Crapshack, 4.00 s.
+ *   Two dive gates, sill 5 m, a 5 m hole, 6 m apart, opposite faces. That is
+ *   the posted split-S, so these two are that pair.
  *
- *   The SPIRALS ARE NOT REFLECTIONS AND CANNOT BE. A helix that climbs as it
- *   sweeps across the field has a low end and a high end, so its reflection
- *   has them the other way round and is a different helix. What they are
- *   instead is the SAME helix twice: gate i of the descent stands at the
- *   same x and the same sill as gate N-1-i of the climb, offset down the
- *   field, flown in the opposite sense. So the pilot climbs and descends
- *   through identical geometry, which is the property that was actually
- *   wanted, and the check pins that rather than a symmetry that is not
- *   there.
- *
- * WHAT IS ON IT, and all three were asked for by name.
- *
- *   SHARP TURNS, EQUAL BOTH WAYS. A hairpin round a flag on each side, at
- *   mirrored positions, entered and left through mirrored gates. Roll and
- *   yaw at full commitment, the same amount in each direction.
- *
- *   A THREE GATE LADDER, UP AND DOWN. The `ladder` element is three 5x5s
- *   stacked, and the schema lets each opening appear once in the flying
- *   order. So the left ladder is flown bottom, middle, top, alternating the
- *   entry direction, which is a vertical zigzag: pitch and throttle
- *   reversals at a fixed amplitude, which is the cleanest thing a rate fit
- *   can be given. The right ladder is the same flown top, middle, bottom.
- *
- *   A SPIRAL UP AND A SPIRAL DOWN. Four gates round an arc with the sill
- *   climbing by a level each time, then its mirror descending. Sustained
- *   co-ordinated roll, pitch and yaw, which is the part of the stick range
- *   nothing else on the track visits.
- *
- * NOTHING FLOATS. Every gate stands on the ground with `position.z` of zero
- * and its opening lifted on its own legs by `sillH`, which is the schema's
- * rule and the reason a spiral is built out of sills rather than out of
- * heights. Only the waypoints are in the air, and the schema leaves those
- * alone because a waypoint is a point and not a thing.
+ * A ghost is a position, not a stick. It says where the fast lap went. It
+ * does not say how much stick that pilot used to stay on it.
  *
  * Usage:
  *     node scripts/ratelab-track.js            write tracks/json/ratelab.json
@@ -94,27 +64,14 @@ import { fileURLToPath } from 'node:url';
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const OUT = join(root, 'tracks/json/ratelab.json');
 
-/* The field. Wider than the shipped 60 by 40 because two hairpins and two
- * spirals need the room, and the spirals need depth behind the hairpins so
- * the line is not doubling back on itself. */
+/* Wide enough for four flags at the posted slalom pitch, and deep enough
+ * for the stacks to stand clear of that lane. */
 const W = 70;
-const D = 50;
-const MID = W / 2;
+const D = 60;
 
-/* MultiGP's 5 inch gate, which is what every other full track here uses:
- * five feet of clear width and height, in metres. */
+/* MultiGP's 5 inch opening, the one the ladder laps were flown through. */
 const CLEAR = 1.524;
-/* The vertical pitch between a stack's openings, from the demo document. */
 const PITCH = 1.557401;
-
-/*
- * THE MIRROR. Every element on the right half is this applied to its partner
- * on the left, so the two halves cannot drift apart. A yaw mirrored about a
- * vertical plane is pi minus itself, because yaw is measured from +x and the
- * reflection sends +x to -x and leaves +y alone.
- */
-const mirrorX = (x) => W - x;
-const mirrorYaw = (yaw) => Math.PI - yaw;
 
 const r6 = (v) => Math.round(v * 1e6) / 1e6;
 
@@ -136,8 +93,6 @@ function el(type, name, x, y, dims, yaw = 0, pitch = 0) {
   return id;
 }
 
-/* An aperture element's opening, in the flying order. `entry` is which way
- * through it: +1 along its own facing, -1 against. */
 function fly(elementId, apertureIndex, entry) {
   sequence.push({
     id: `sq-${sequence.length + 1}`,
@@ -150,7 +105,6 @@ function fly(elementId, apertureIndex, entry) {
   });
 }
 
-/* A marker flown round on one side, or a waypoint flown through. */
 function round(elementId, passSide, clearance) {
   sequence.push({
     id: `sq-${sequence.length + 1}`,
@@ -163,166 +117,105 @@ function round(elementId, passSide, clearance) {
   });
 }
 
-function gateDims(levels, sillH) {
-  return {
-    levels, sillH: r6(sillH), clearW: CLEAR, clearH: CLEAR, levelPitch: PITCH,
-  };
-}
-
-/* A waypoint is a point in the air and is the one thing the schema does not
- * set down, which is what makes it the right tool for shaping a line over
- * the top of a stack. `height` is how far up it sits. */
-function waypointAt(name, x, y, height) {
+function waypointAt(name, x, y, height, yaw) {
   const id = `el-${elements.length + 1}`;
   elements.push({
     id,
     type: 'waypoint',
     name,
     position: { x: r6(x), y: r6(y), z: r6(height) },
-    yaw: 0,
+    yaw: r6(yaw),
     pitch: 0,
-    yawOverridden: false,
+    yawOverridden: true,
     dims: { height: 0.1, poleRadius: 0.02, clearance: 0 },
   });
   return id;
 }
 
-/* ------------------------------------------------------------------ */
-/* The grid, on the centre line, facing up the field.                  */
-/* ------------------------------------------------------------------ */
-el('startPads', 'Grid', MID, 4, { pads: 4, spacing: 1.5, padSize: 0.6 }, Math.PI / 2);
+function gateDims(levels, sillH, clear = CLEAR) {
+  return {
+    levels,
+    sillH: r6(sillH),
+    clearW: clear,
+    clearH: clear,
+    levelPitch: r6(levels > 1 ? PITCH : clear),
+  };
+}
 
-/* ------------------------------------------------------------------ */
-/* Out of the grid, straight, so every lap starts the same way.        */
-/* ------------------------------------------------------------------ */
-const out = el('gate', 'Out', MID, 11, gateDims(1, 0), Math.PI / 2);
-fly(out, 0, 1);
+/* The lane the slalom runs along, and which side of it the first flag is
+ * passed. Two metres off the lane is where AsylumFPV's flags stand. */
+const LANE_Y = 18;
+const OFF = 2;
+const FLAG_CLEAR = 1.5;
 
-/* ------------------------------------------------------------------ */
-/* THE LEFT HAIRPIN. Entered on a gate angled across the field, round a
- * flag, and out through a gate angled the other way. The flag is what
- * makes it sharp: a marker has no opening, so the line is free to come
- * as tight round it as the pilot dares.
- * ------------------------------------------------------------------ */
-const HAIRPIN_Y = 20;
-const HAIRPIN_IN_X = 21;
-const HAIRPIN_FLAG_X = 9;
-const HAIRPIN_OUT_Y = 27;
-/* Angled 30 degrees off straight up the field, so the turn in is a real
- * direction change rather than a gate you can square up to. */
-const HAIRPIN_IN_YAW = Math.PI / 2 + Math.PI / 6;
-const HAIRPIN_OUT_YAW = Math.PI / 2 - Math.PI / 6;
+el('startPads', 'Grid', 8, LANE_Y, { pads: 4, spacing: 1.5, padSize: 0.6 }, 0);
 
-const lIn = el('gate', 'Left in', HAIRPIN_IN_X, HAIRPIN_Y, gateDims(1, 0), HAIRPIN_IN_YAW);
-fly(lIn, 0, 1);
-const lFlag = el('flag', 'Left apex', HAIRPIN_FLAG_X, (HAIRPIN_Y + HAIRPIN_OUT_Y) / 2,
-  { height: 2.4, poleRadius: 0.03, clearance: 1.5 });
-round(lFlag, 'left', 1.5);
-const lOut = el('gate', 'Left out', HAIRPIN_IN_X, HAIRPIN_OUT_Y, gateDims(1, 0), HAIRPIN_OUT_YAW);
-fly(lOut, 0, 1);
+/* Sill 1 m, so the lane sits where the slalom ghosts flew (about 1 to 2 m)
+ * rather than on the grass. A Hermite between ground-level knots bows
+ * under the floor; one between knots at this height does not. */
+const first = el('gate', 'First', 16, LANE_Y, gateDims(1, 1), 0);
+fly(first, 0, 1);
 
-/* ------------------------------------------------------------------ */
-/* THE LADDER UP. Three openings, flown bottom, middle, top, with the
- * entry direction alternating, so the pilot zigzags up the stack. The
- * waypoints are what take them over the top of it between passes: they
- * sit a clear metre above the stack so the line goes over rather than
- * through, and they are in the air, which only a waypoint may be.
- * ------------------------------------------------------------------ */
-const LADDER_X = 24;
-const LADDER_Y = 35;
-const LADDER_TOP = CLEAR / 2 + 2 * PITCH;
-const ladderUp = el('ladder', 'Ladder up', LADDER_X, LADDER_Y, gateDims(3, 0), Math.PI / 2);
-fly(ladderUp, 0, 1);
-round(waypointAt('Over the ladder, first', LADDER_X, LADDER_Y + 6, LADDER_TOP + 2), null, 0);
-fly(ladderUp, 1, -1);
-round(waypointAt('Over the ladder, second', LADDER_X, LADDER_Y - 6, LADDER_TOP + 2), null, 0);
-fly(ladderUp, 2, 1);
+/* Four flags, 10 m apart, alternating sides. 10 m is the short end of the
+ * chords Alexulfer's best lap took between flags. */
+const FLAG_X = [26, 36, 46, 56];
+const FLAG_SIDE = ['right', 'left', 'right', 'left'];
+FLAG_X.forEach((x, i) => {
+  const side = FLAG_SIDE[i];
+  const y = LANE_Y + (side === 'left' ? OFF : -OFF);
+  const id = el('flag', `Slalom ${i + 1}`, x, y, {
+    height: 2.4, poleRadius: 0.03, clearance: FLAG_CLEAR,
+  });
+  round(id, side, FLAG_CLEAR);
+});
 
-/* ------------------------------------------------------------------ */
-/* THE SPIRAL UP. Four gates round a quarter arc at the top of the
- * field, the sill climbing one stack pitch each time, so the line is a
- * helix. Co-ordinated roll, pitch and yaw held for several seconds,
- * which nothing else on this track asks for.
+/* Two triples, 12 m apart, both facing on up the field. Up is bottom to
+ * top, down is top to bottom, every pass from the same face, which is how
+ * Asylum Fpv's 9.13 s was flown. */
+const STACK_X = 62;
+/* Between the last flag and the stack, at the height the lane is flying,
+ * so the flag knots are not pulled down to the stack's bottom hole. */
+round(waypointAt('Onto the stack', 59, 24, 1.6, Math.atan2(30 - 24, STACK_X - 59)), null, 0);
+
+const up = el('ladder', 'Triple up', STACK_X, 30, gateDims(3, 0), Math.PI / 2);
+fly(up, 0, 1);
+fly(up, 1, 1);
+fly(up, 2, 1);
+const down = el('ladder', 'Triple down', STACK_X, 42, gateDims(3, 0), Math.PI / 2);
+fly(down, 2, 1);
+fly(down, 1, 1);
+fly(down, 0, 1);
+
+/* The corkscrew: one more triple, flown the same way, so the line wraps
+ * the stack on the way up. Facing back across the field. */
+const cork = el('ladder', 'Corkscrew', 48, 52, gateDims(3, 0), Math.PI);
+fly(cork, 0, 1);
+fly(cork, 1, 1);
+fly(cork, 2, 1);
+
+/* The split-S pair, copied off the Immelman: flat gates, sill 5 m, a 5 m
+ * hole, 6 m apart, opposite faces. */
+const DIVE = { sillH: 5, clearH: 5, clearW: 5, levels: 1, levelPitch: 5 };
+const splitIn = el('diveGate', 'Split-S in', 36, 52, DIVE, Math.PI, Math.PI / 2);
+fly(splitIn, 0, 1);
+const splitOut = el('diveGate', 'Split-S out', 36, 46, DIVE, 0, Math.PI / 2);
+fly(splitOut, 0, -1);
+
+/*
+ * THE RETURN TO THE FIRST GATE.
  *
- * Each gate faces along the arc's tangent at its own station, computed
- * rather than typed, so the helix cannot be built facing the wrong way.
- * ------------------------------------------------------------------ */
-const SPIRAL_CX = MID;
-const SPIRAL_CY = D - 8;
-const SPIRAL_R = 9;
-const SPIRAL_N = 4;
-/* Starts on the left of the arc and sweeps across the top to the right,
- * which is the direction the ladder leaves the pilot travelling. */
-const SPIRAL_FROM = Math.PI;
-const SPIRAL_TO = 0;
-
-for (let i = 0; i < SPIRAL_N; i += 1) {
-  const u = i / (SPIRAL_N - 1);
-  const a = SPIRAL_FROM + (SPIRAL_TO - SPIRAL_FROM) * u;
-  const x = SPIRAL_CX + SPIRAL_R * Math.cos(a);
-  const y = SPIRAL_CY + SPIRAL_R * Math.sin(a);
-  /* The tangent of a circle swept from pi to 0 points at the angle minus
-   * a quarter turn, which is the heading of travel there. */
-  const yaw = a - Math.PI / 2;
-  const sill = i * PITCH;
-  const id = el('gate', `Spiral up ${i + 1}`, x, y, gateDims(1, sill), yaw);
-  fly(id, 0, 1);
-}
-
-/* ------------------------------------------------------------------ */
-/* THE SPIRAL DOWN, the same arc mirrored and descending, so the climb
- * and the descent are the same manoeuvre in opposite directions. Nearer
- * the grid, so the lap closes.
- * ------------------------------------------------------------------ */
-const DOWN_CY = SPIRAL_CY - 2 * SPIRAL_R - 2;
-for (let i = 0; i < SPIRAL_N; i += 1) {
-  const u = i / (SPIRAL_N - 1);
-  /* Swept the other way round, from 0 to pi, so this is the mirror of the
-   * climb and not a repeat of it. */
-  const a = SPIRAL_TO + (SPIRAL_FROM - SPIRAL_TO) * u;
-  const x = SPIRAL_CX + SPIRAL_R * Math.cos(a);
-  const y = DOWN_CY + SPIRAL_R * Math.sin(a);
-  const yaw = a + Math.PI / 2;
-  const sill = (SPIRAL_N - 1 - i) * PITCH;
-  const id = el('gate', `Spiral down ${i + 1}`, x, y, gateDims(1, sill), yaw);
-  fly(id, 0, 1);
-}
-
-/* ------------------------------------------------------------------ */
-/* THE LADDER DOWN, the left ladder mirrored, flown top to bottom.      */
-/* ------------------------------------------------------------------ */
-const ladderDown = el('ladder', 'Ladder down', mirrorX(LADDER_X), LADDER_Y,
-  gateDims(3, 0), mirrorYaw(Math.PI / 2));
-fly(ladderDown, 2, 1);
-round(waypointAt('Down the ladder, first', mirrorX(LADDER_X), LADDER_Y - 6, LADDER_TOP + 2), null, 0);
-fly(ladderDown, 1, -1);
-round(waypointAt('Down the ladder, second', mirrorX(LADDER_X), LADDER_Y + 6, LADDER_TOP + 2), null, 0);
-fly(ladderDown, 0, 1);
-
-/* ------------------------------------------------------------------ */
-/* THE RIGHT HAIRPIN, the left one mirrored exactly.                    */
-/* ------------------------------------------------------------------ */
-const rIn = el('gate', 'Right in', mirrorX(HAIRPIN_IN_X), HAIRPIN_OUT_Y,
-  gateDims(1, 0), mirrorYaw(HAIRPIN_OUT_YAW));
-fly(rIn, 0, -1);
-const rFlag = el('flag', 'Right apex', mirrorX(HAIRPIN_FLAG_X), (HAIRPIN_Y + HAIRPIN_OUT_Y) / 2,
-  { height: 2.4, poleRadius: 0.03, clearance: 1.5 });
-round(rFlag, 'right', 1.5);
-const rOut = el('gate', 'Right out', mirrorX(HAIRPIN_IN_X), HAIRPIN_Y,
-  gateDims(1, 0), mirrorYaw(HAIRPIN_IN_YAW));
-fly(rOut, 0, -1);
-
-/* ------------------------------------------------------------------ */
-/* Home, through the finish gate on the centre line, facing back down
- * the field so the lap closes onto the grid.
- * ------------------------------------------------------------------ */
-const home = el('gate', 'Home', MID, 14, gateDims(1, 0), Math.PI / 2);
-fly(home, 0, -1);
+ * The split-S is at 8 m and the first gate is under 1 m, and one Hermite
+ * between two level tangents that far apart bows through the floor. Two
+ * waypoints step the line down. They are points, not gates. The heading is
+ * the direction from the split-S back to the first gate, atan2 of that
+ * run, so the tangent does not kink.
+ */
+const back = Math.atan2(18 - 46, 16 - 36);
+round(waypointAt('Return high', 28, 38, 5, back), null, 0);
+round(waypointAt('Return low', 22, 28, 2.5, back), null, 0);
 
 const doc = {
   schemaVersion: 3,
-  /* A fixed id, because this track ships and is seated by name rather than
-   * being one of a pilot's own. Eight hex digits, as the schema requires. */
   id: 'trk-ra7e1ab0',
   name: 'Rate Lab',
   createdUtc: '2026-10-06T00:00:00Z',
@@ -333,11 +226,10 @@ const doc = {
   branding: { logos: [] },
   credit: {
     designer: 'WebFPVSimulator',
-    note: 'Generated by scripts/ratelab-track.js. The two hairpins are exact reflections '
-      + 'about the centre line, so a left hand turn and a right hand turn are the same '
-      + 'manoeuvre; the two ladders likewise, one flown up and one down; and the two '
-      + 'spirals are the same helix flown climbing and descending. Edit the script, not '
-      + 'this file.',
+    note: 'Generated by scripts/ratelab-track.js. First gate, four slalom flags, '
+      + 'a triple stack up and one down, a triple corkscrew up, then two split-S '
+      + 'gates. The spacing is taken from the fastest ghosts on the same shapes '
+      + 'on the public board. Edit the script, not this file.',
   },
   elements,
   sequence,

@@ -142,6 +142,7 @@ import {
   readPostedBest,
   writeBuilderIntent,
   writePendingTime,
+  writeShareImport,
   /* Only clearShareImport. The shell used to WRITE a share seat too, for a
    * track that ships with the simulator; the Track room no longer seats one
    * of those, so what is left is clearing a stale seat out of the way of
@@ -4243,29 +4244,29 @@ const WAYS = [
    * arriving to fly, and a tuning utility sitting under the cursor on every
    * visit would be the front door answering a question nobody asked.
    *
-   * FREESTYLE, AND DELIBERATELY NO EXERCISES. The measurement wants natural
-   * flying, so the mode is the one with no gates and no clock and the pilot
-   * is asked for nothing at all. That is not a shortcut, it is the design:
-   * a set of drills would measure how well somebody performs drills, and
-   * what the fit needs is how they actually fly. It is also the only
-   * honest position available, since calibration exercise designs are
-   * exactly what WILDTYPE's RateFinder licence reserves and this feature is
-   * clean room of it. See src/fc/ratemyrates.js.
-   *
-   * THE MAP IS NOT OVERRIDDEN. Whatever freestyle world is seated is where
-   * this flies, because the fit does not care where it happens and a card
-   * that moved a pilot's world would be a surprise in exchange for
-   * nothing.
+   * THE RATE LAB, NOT FREESTYLE. The owner flew the freestyle version and
+   * said tuning rates there gives most people no structure. The fit
+   * compares each pass with the last, so two passes are only comparable
+   * when they were the same kind of flying. The card seats the Rate Lab:
+   * a first gate, a slalom, a triple stack up and down, a corkscrew and a
+   * split-S, and asks the pilot for no drill. They fly the track. That is
+   * also the licence line. Calibration exercise designs are what
+   * WILDTYPE's RateFinder reserves, and a race track made of ordinary
+   * elements is not one. See src/fc/ratemyrates.js and src/maps/ratelab.js.
    */
   {
     id: 'ratemyrates',
     airframe: '5inch',
-    mode: 'freestyle',
-    measure: true,
+    mode: 'race',
+    map: 'ratelab',
+    /* Not yet. The pilot flies the track and learns it, then the button
+     * on the flight screen starts the check. Arming it here would take
+     * the rates off them before they had seen the course. */
+    measure: false,
     label: 'Rate my Rates',
     art: 'assets/gate/ratemyrates.jpg',
-    blurb: 'Fly how you normally fly and this reads your hands: how big your corrections are, how hard you commit, how fast the quad actually turned. Then it says what rate profile that asks for, and why, in your own numbers.',
-    facts: ['No drills', 'Reads your sticks', 'One minute'],
+    blurb: 'The Rate Lab: a slalom, a triple stack each way, a corkscrew and a split-S. Fly it and this reads your hands, then moves your rates and puts you back on the grid.',
+    facts: ['Slalom', 'Triple stack', 'Split-S'],
   },
 ].map((w) => ({ ...w, action: `way-${w.id}` }));
 
@@ -5901,6 +5902,25 @@ export class Ui {
       this.show('paused');
     });
 
+    /*
+     * START CHECKING MY RATES, just above the weight slider.
+     *
+     * The track is flown first, with nothing watching. This is the press
+     * that starts the check, once the pilot knows the course. It is not on
+     * the gate card: that card only seats the track.
+     */
+    this.rateCheck = btn('bug-chip rate-check', 'Start checking my rates');
+    this.rateCheck.addEventListener('click', () => this.startRateCheck());
+    /* Above the weight slider, in the centre, not in a corner. */
+    this.osdRates = el('div', 'osd-rates');
+    this.osdRatesNow = el('div', 'osd-rates-now', '');
+    this.osdRatesWas = el('div', 'osd-rates-was', '');
+    this.osdRatesWas.hidden = true;
+    this.osdRates.append(this.osdRatesNow, this.osdRatesWas);
+    const airRow = this.osdAir.range.parentElement;
+    this.osdAir.box.insertBefore(this.osdRates, airRow);
+    this.osdAir.box.insertBefore(this.rateCheck, airRow);
+
     this.musicDock = el('div', 'music-dock');
     this.musicDock.setAttribute('role', 'group');
     this.musicDock.setAttribute('aria-label', 'Music');
@@ -6500,6 +6520,15 @@ export class Ui {
       this.pauseChip.hidden = dialog || this.screen !== 'flight';
       this.pauseChip.classList.toggle('on-flight', this.screen === 'flight');
     }
+    /* Up while a race is being flown and the check has not started. A
+     * finished check (they kept the rates) shows it again, so they can
+     * run another. Freestyle has no lap to check. */
+    if (this.rateCheck) {
+      const read = this.rateProbe ? this.rateProbe() : null;
+      const checking = this.measuring && (!read || read.state !== 'done');
+      const race = this.mode === 'race';
+      this.rateCheck.hidden = dialog || !race || this.screen !== 'flight' || checking;
+    }
     /* The dock takes the second slot when there is a chip in the first and
      * the corner when there is not, which is the title. Written as a class
      * rather than as a top in pixels here, so the status bar's own offset
@@ -7089,6 +7118,127 @@ export class Ui {
     }, 1400);
   }
 
+  /*
+   * The same dialog, asked by a rate pass rather than by a finished race.
+   * It does not set feelAsked. That flag is the one automatic offer a
+   * pilot ever gets, on the second results screen, and a tuning run that
+   * spent it would take the offer away from somebody who has not had it.
+   * Returns false when another dialog is already up, so the caller can
+   * wait rather than closing whatever the pilot is reading.
+   */
+  /*
+   * After a Rate Lab lap the new rates are already on the quad. This asks
+   * whether to keep them. It is not the flight-feel report: that one asks
+   * how the quad flew and files a ticket, and a pilot who answered it
+   * found that nothing about their rates changed. Two answers, and both
+   * do something.
+   *
+   *   sluggish  centre and full stick up one small step
+   *   twitchy   full stick down one small step, a little expo on
+   *   better    the same small step again
+   *   again     same rates, another lap
+   */
+  askRateVerdict(times) {
+    if (this.nameWait) {
+      this.closeNameDialog(null);
+    }
+    const box = el('div', 'name-dialog-box');
+    box.append(el('h2', null, 'How are your new rates?'));
+    let lede = 'You have just flown a lap on the new rates. How did they feel?';
+    const measureMs = times && times.measureMs;
+    const trialMs = times && times.trialMs;
+    if (measureMs > 0 && trialMs > 0) {
+      const delta = (trialMs - measureMs) / 1000;
+      if (delta < -0.05) {
+        lede = `That lap was ${(-delta).toFixed(1)} seconds faster than the lap on your old rates. How are your new rates?`;
+      } else if (delta > 0.05) {
+        lede = `That lap was ${delta.toFixed(1)} seconds slower than the lap on your old rates. How are your new rates?`;
+      } else {
+        lede = 'That lap was about the same speed as the one on your old rates. How are your new rates?';
+      }
+    }
+    box.append(el('p', 'lede', lede));
+    const row = el('div', 'name-dialog-row rate-choices');
+    const sluggish = btn('name-dialog-btn', 'Too sluggish');
+    const twitchy = btn('name-dialog-btn', 'Too twitchy');
+    const better = btn('name-dialog-btn on', 'A little better, but not there yet');
+    const again = btn('name-dialog-btn', 'I\'m not sure, do another lap');
+    row.append(sluggish, twitchy, better, again);
+    box.append(row);
+    this.nameDialog.textContent = '';
+    this.nameDialog.append(box);
+    this.nameDialog.hidden = false;
+    this.syncChips();
+    return new Promise((resolve) => {
+      this.nameWait = resolve;
+      const finish = (value) => {
+        this.closeNameDialog(value);
+      };
+      sluggish.addEventListener('click', () => finish('sluggish'));
+      twitchy.addEventListener('click', () => finish('twitchy'));
+      better.addEventListener('click', () => finish('better'));
+      again.addEventListener('click', () => finish('again'));
+      const onKey = (e) => {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+      };
+      this.nameKeyHandler = onKey;
+      this.nameDialog.addEventListener('keydown', onKey, true);
+    });
+  }
+
+  /*
+   * The Rate Lab, opened in the builder as a copy. The canvas it replaces
+   * is kept in Load. The pilot edits the slalom there; the next time the
+   * Rate Lab map builds, it flies that copy.
+   */
+  /*
+   * The bottom-right button. Arms the check on the rates they are flying
+   * now, without putting them back on the grid: they asked for it because
+   * they already know the track. If a check is still marked on from a run
+   * that finished, it is dropped and started again so the coach sees the
+   * edge and begins a new pass.
+   */
+  startRateCheck() {
+    if (this.measuring) {
+      this.measuring = false;
+      saveSettings(this.settings);
+      if (this.onSettings) {
+        this.onSettings(this.settings);
+      }
+    }
+    this.mode = 'race';
+    this.measuring = true;
+    saveSettings(this.settings);
+    if (this.onSettings) {
+      this.onSettings(this.settings);
+    }
+    this.syncChips();
+    if (this.screen !== 'flight' && this.onAction) {
+      this.act('fly');
+    }
+  }
+
+  async openRateLabInBuilder() {
+    const url = new URL('../../tracks/json/ratelab.json', import.meta.url);
+    const res = await fetch(url);
+    if (!res.ok) {
+      return;
+    }
+    const doc = await res.json();
+    writeShareImport({
+      id: doc.id,
+      name: doc.name || 'Rate Lab',
+      document: doc,
+      stock: true,
+      author: '',
+    });
+    writeBuilderIntent({ kind: 'remix' });
+    window.location.href = 'src/trackbuilder/index.html?mode=race';
+  }
+
   openFeelReport() {
     if (this.bugFiling || (this.nameDialog && !this.nameDialog.hidden)) {
       return;
@@ -7138,7 +7288,7 @@ export class Ui {
     box.append(el(
       'p',
       'lede',
-      `One honest word steers the tune work more than any telemetry. Only the first row is needed; your tune, PID adjustment and rates travel with the answer so the numbers behind the feel arrive too. You were flying ${context.tuneName}.`,
+      `One honest word steers the tune work more than any telemetry. Only the first row is needed; your tune, PID adjustment and rates travel with the answer so the numbers behind the feel arrive too. You were flying ${context.tuneName}.${context.line ? ` ${context.line}` : ''}`,
     ));
 
     let feel = null;
@@ -7520,6 +7670,7 @@ export class Ui {
       /* A map from the board is flown in the built world, and the row names
        * that map and its builder rather than calling it Your map. */
       const shared = world && world.id === 'built' ? this.sharedMap : null;
+      const own = m.ownCourse ? m : null;
       const modeRow = this.mode === 'freestyle'
         ? {
           label: 'Map',
@@ -7540,14 +7691,21 @@ export class Ui {
               ? `${world.note} Your quad and the physics model are in here.`
               : townNote(s, this.loadFailure)),
         }
-        : {
-          label: 'Track',
-          value: seat ? seat.name : 'Choose one',
-          action: 'courses',
-          note: seat
-            ? `${seat.name}, and every other track. Gated, against the clock, and a lap flown here can go on the board.`
-            : 'No track is seated yet. Your own tracks, every track the board is offering, and the builder, are in here.',
-        };
+        : (own
+          ? {
+            label: 'Track',
+            value: own.name,
+            action: 'courses',
+            note: own.note,
+          }
+          : {
+            label: 'Track',
+            value: seat ? seat.name : 'Choose one',
+            action: 'courses',
+            note: seat
+              ? `${seat.name}, and every other track. Gated, against the clock, and a lap flown here can go on the board.`
+              : 'No track is seated yet. Your own tracks, every track the board is offering, and the builder, are in here.',
+          });
       /*
        * THREE ROOMS AND A VERB, in place of twelve typographic equals.
        *
@@ -8678,7 +8836,7 @@ export class Ui {
     if (this.screen === 'launch') {
       const seat = activeCourseSummary();
       const m = MAPS.find((x) => x.id === s.map) ?? MAPS[0];
-      const trackName = seat && seat.name ? seat.name : m.name;
+      const trackName = m.ownCourse ? m.name : (seat && seat.name ? seat.name : m.name);
       return [
         {
           label: 'Track',
@@ -9009,15 +9167,19 @@ export class Ui {
             label: 'Nothing measured yet',
             value: '',
             info: true,
-            note: 'This room reads a Rate my Rates session. Press Rate my Rates on the front screen '
-              + 'and fly how you normally fly, and it refines your rates as you go.',
+            note: 'This room reads a Rate my Rates session. Press Rate my Rates on the front screen, '
+              + 'fly one lap, and then say whether the new rates are any good.',
           },
           {
             label: 'Start a session',
             action: 'ratemyrates-start',
             primary: true,
-            note: 'Seats the five inch, puts you in a freestyle world with no gates and no clock, '
-              + 'and starts watching. No drills: fly whatever you fly.',
+            note: 'Seats the five inch on the Rate Lab and starts watching. Fly one lap. Rates stay as they are until that lap is finished.',
+          },
+          {
+            label: 'Edit the track',
+            action: 'ratelab-edit',
+            note: 'Opens this track in the builder so you can fix the course. The track already on the canvas is kept in Load.',
           },
           back,
         ];
@@ -9154,7 +9316,7 @@ export class Ui {
             action: 'ratemyrates-start',
             primary: true,
             note: left
-              ? 'Puts you back in a freestyle world and starts a fresh run from what you are flying '
+              ? 'Puts you back on the Rate Lab and starts a fresh run from what you are flying '
                 + 'now, which is where the passes above left you.'
               : 'Starts a fresh run from what you are flying now. Worth doing if this one stopped '
                 + 'rather than settled, and worth doing again in a month: your hands change.',
@@ -9170,6 +9332,11 @@ export class Ui {
               + 'arrived on.'
             : `Back to ${ratesShort(read.opening)}, the profile you arrived on, and this run is `
               + 'forgotten. Nothing about a measured run is permanent until you decide it is.',
+        },
+        {
+          label: 'Edit the track',
+          action: 'ratelab-edit',
+          note: 'Opens this track in the builder so you can fix the course. The track already on the canvas is kept in Load.',
         },
         back,
       ];
@@ -13757,7 +13924,10 @@ export class Ui {
       try {
         const listing = inspectCourse();
         this.resultsDocId = listing && listing.doc ? listing.doc.id : null;
-        if (listing && listing.canPostTime && listing.shareId) {
+        /* Only a lap on the seated track. The Rate Lab, and any other map
+         * that is not the builder's course, must not file its time against
+         * whatever document happens to be in the seat. */
+        if (this.settings.map === 'custom' && listing && listing.canPostTime && listing.shareId) {
           writePendingTime({
             trackId: listing.shareId,
             lapMs: this.resultsBoard.lapMs,
@@ -15129,6 +15299,30 @@ export class Ui {
    * after some air, sitting still with the slider under it and a thumb
    * free, and it retires, remembered, on the next takeoff.
    */
+  setRateReadout(now, was) {
+    if (!this.osdRates) {
+      return;
+    }
+    const show = this.screen === 'flight' && this.mode === 'race' && Boolean(now);
+    this.osdRates.hidden = !show;
+    if (!show) {
+      return;
+    }
+    /* Centre and full stick, deg/s, the two columns a step actually moves.
+     * The one-line summary is full stick only, so a centre step would not
+     * show up in it. */
+    const line = (r) => {
+      const p = normaliseRates(r);
+      const bit = (axis) => `${p[axis].rcRate * 10}/${p[axis].srate * 10}`;
+      return `R ${bit('roll')}  P ${bit('pitch')}  Y ${bit('yaw')}`;
+    };
+    this.osdRatesNow.textContent = `Now  ${line(now)}`;
+    this.osdRatesWas.hidden = !was;
+    if (was) {
+      this.osdRatesWas.textContent = `Was  ${line(was)}`;
+    }
+  }
+
   setAirSlider(show, ready = true, { airMs = 0, padFlying = false, touch = false } = {}) {
     const air = this.osdAir;
     if (!air) {
@@ -16572,6 +16766,12 @@ export class Ui {
       return Boolean(seatedFreestyleMap(this.settings));
     }
     if (this.mode === 'race') {
+      const seated = MAPS.find((x) => x.id === this.settings.map);
+      /* The Rate Lab carries its own course. It is a race without a track
+       * in the builder's seat, and Fly has to launch it. */
+      if (seated && seated.ownCourse) {
+        return true;
+      }
       return this.settings.map === 'custom' && hasLoadedTrack();
     }
     return true;
@@ -17072,7 +17272,16 @@ export class Ui {
       }
       this.returnTo = 'title';
       this.roomFrom = null;
-      if (way.mode === 'race') {
+      /* A way that names its map seats that map. The Rate Lab is not the
+       * builder's track and not a freestyle world, so neither branch below
+       * would put the pilot on it. */
+      if (way.map && this.settings.map !== way.map) {
+        this.seatMap(way.map);
+        return;
+      }
+      if (way.map) {
+        /* Already on it. Fall through to the menu behind the gate. */
+      } else if (way.mode === 'race') {
         if (!hasLoadedTrack()) {
           this.show('courses');
           return;
@@ -17216,7 +17425,10 @@ export class Ui {
       this.show(this.mode === 'freestyle' ? 'freestyle' : 'courses');
       return;
     }
-    if (action === 'fly' && seatIsRace(this.settings)) {
+    /* A measured run launches like freestyle: straight into the air. The
+     * launch card is for a lap that can go on the board, and this run is
+     * a tuning pass. ratepass-check presses Fly and expects the sim. */
+    if (action === 'fly' && seatIsRace(this.settings) && !this.measuring && this.settings.map !== 'ratelab') {
       this.returnTo = this.screen === 'paused' ? 'paused' : 'title';
       /* The card once per track per visit: see launchCardSeen. */
       if (launchCardSeen(this.settings)) {
@@ -17249,6 +17461,10 @@ export class Ui {
      */
     if (action === 'ratemyrates-start') {
       this.act('way-ratemyrates');
+      return;
+    }
+    if (action === 'ratelab-edit') {
+      this.openRateLabInBuilder();
       return;
     }
     /*

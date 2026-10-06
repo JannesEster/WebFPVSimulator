@@ -78,7 +78,7 @@
  * along with this software. If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { RATE_AXES, normaliseRates, rateAxis } from '../../configs/rates.js';
+import { RATE_AXES, normaliseRates, pitchMatchesRoll, rateAxis } from '../../configs/rates.js';
 import { angleRateDeg } from './ratescurve.js';
 
 /*
@@ -639,6 +639,10 @@ class AxisTally {
 export class RateSession {
   constructor(rates) {
     this.axes = { roll: new AxisTally(), pitch: new AxisTally(), yaw: new AxisTally() };
+    /* How far one lap may move the centre rate, as a fraction. A rejected
+     * trial that was slower halves it. Reset of the tallies does not. */
+    this.stepGain = 0.12;
+    this.line = null;
     this.reset(rates);
   }
 
@@ -651,6 +655,10 @@ export class RateSession {
      * property of the profile, and the profile cannot change without this
      * being called. */
     this.anchor = anchorOf(this.rates);
+    this.lineOver = 0;
+    this.lineUnder = 0;
+    this.lineSat = 0;
+    this.lineCompared = 0;
   }
 
   /*
@@ -688,7 +696,7 @@ export class RateSession {
    * axis in deg/s. The demand is computed here, from the stick and the
    * profile, through the firmware's own curve.
    */
-  push(dtS, stick, gyroDps) {
+  push(dtS, stick, gyroDps, place) {
     if (!(dtS > 0) || dtS > 1) {
       /* A tab that was in the background for a minute arrives as one
        * enormous interval, and weighting a single sample by sixty seconds
@@ -703,6 +711,62 @@ export class RateSession {
       const demand = angleRateDeg(this.rates.type, this.anchor[axis].spec, s);
       this.axes[axis].push(dtS, s, demand, g);
     }
+    if (place && this.line) {
+      this.scoreLine(dtS, clamp(Number(stick.roll) || 0, -1, 1), place);
+    }
+  }
+
+  /*
+   * Roll against the racing line.
+   *
+   * The line wants a roll RATE only where its curvature is changing: the
+   * entry and the exit. Through a steady corner and down a straight the
+   * stick that holds the line is centred, because the stick commands rate,
+   * not angle. An over-correction is stick the line did not ask for. An
+   * under-correction is a corner entry they did not put in, or a drift off
+   * the line they did not answer.
+   */
+  scoreLine(dtS, stick, place) {
+    const near = nearestOnLine(this.line, place.x, place.z);
+    if (!near || near.dist > 12) {
+      return;
+    }
+    const expected = expectedRollStick(this.rates, this.anchor.roll.spec, near, place.speed || 0);
+    const cross = near.cross;
+    const mag = stick < 0 ? -stick : stick;
+    const wantQuiet = expected < 0.05 && expected > -0.05;
+    const correcting = cross < -2 || cross > 2
+      ? stick * cross < 0 && mag >= 0.06
+      : false;
+    let over = false;
+    let under = false;
+    if (wantQuiet) {
+      if (!correcting && mag > 0.08 && cross > -2 && cross < 2) {
+        over = true;
+      }
+      if ((cross <= -2 || cross >= 2) && stick * cross > 0 && mag > 0.08) {
+        over = true;
+      }
+      if ((cross <= -2 || cross >= 2) && !correcting && mag < 0.06) {
+        under = true;
+      }
+    } else if (stick * expected < 0 && mag > 0.05) {
+      over = true;
+    } else if (mag > (expected < 0 ? -expected : expected) + 0.15) {
+      over = true;
+    } else if ((expected > 0.1 || expected < -0.1) && mag < (expected < 0 ? -expected : expected) * 0.5) {
+      under = true;
+    }
+    this.lineCompared += dtS;
+    if (over) {
+      this.lineOver += dtS;
+    }
+    if (under) {
+      this.lineUnder += dtS;
+    }
+    if (mag >= 0.92 && (near.kappa > 0.05 || near.kappa < -0.05)) {
+      this.lineSat += dtS;
+    }
   }
 
 
@@ -711,6 +775,14 @@ export class RateSession {
       seconds: this.seconds,
       moveSeconds: this.moveSeconds,
       type: this.rates.type,
+      line: this.line ? {
+        overS: this.lineOver,
+        underS: this.lineUnder,
+        satS: this.lineSat,
+        comparedS: this.lineCompared,
+        step: this.stepGain || 0.12,
+        force: this.forceStep || 0,
+      } : null,
     };
     for (const axis of RATE_AXES) {
       out[axis] = { ...this.axes[axis].read(), anchor: this.anchor[axis] };
@@ -766,7 +838,298 @@ function tensOf(dps, lo, hi) {
  * configs/rates.js owns, normalised, so it can be flown, saved as a preset
  * or compared against what is flying with no further handling.
  */
+const G = 9.80665;
+const RAD2DEG = 180 / Math.PI;
+
+function wrapPi(a) {
+  let v = a;
+  while (v > Math.PI) {
+    v -= 2 * Math.PI;
+  }
+  while (v < -Math.PI) {
+    v += 2 * Math.PI;
+  }
+  return v;
+}
+
+/* Heading in the scene's ground plane. 0 faces -z. Positive is a right turn,
+ * which is positive roll stick. */
+function headingOf(dx, dz) {
+  return Math.atan2(dx, -dz);
+}
+
+/*
+ * The racing line as samples the fit can query. Curvature is signed: positive
+ * is a right turn. dkappa is how fast that curvature is changing along the
+ * line, which is the only place a rate-mode roll stick has to leave centre.
+ */
+export function buildRacingLine(points) {
+  const pts = (points || []).filter((p) => p && Number.isFinite(p.x) && Number.isFinite(p.z));
+  if (pts.length < 3) {
+    return null;
+  }
+  const closed = Math.hypot(pts[0].x - pts[pts.length - 1].x, pts[0].z - pts[pts.length - 1].z) < 2;
+  const n = pts.length;
+  const samples = [];
+  for (let i = 0; i < n; i += 1) {
+    const prevI = i === 0 ? (closed ? n - 2 : 0) : i - 1;
+    const nextI = i === n - 1 ? (closed ? 1 : n - 1) : i + 1;
+    const a = pts[prevI];
+    const b = pts[i];
+    const c = pts[nextI];
+    const end = !closed && (i === 0 || i === n - 1);
+    const h1 = headingOf(c.x - b.x, c.z - b.z);
+    let kappa = 0;
+    if (!end) {
+      const h0 = headingOf(b.x - a.x, b.z - a.z);
+      const ds = Math.hypot(c.x - a.x, c.z - a.z) * 0.5;
+      kappa = ds > 1e-3 ? wrapPi(h1 - h0) / ds : 0;
+    }
+    samples.push({
+      x: b.x, z: b.z, heading: h1, kappa, dkappa: 0,
+    });
+  }
+  for (let i = 0; i < n; i += 1) {
+    const prevI = i === 0 ? (closed ? n - 2 : 0) : i - 1;
+    const nextI = i === n - 1 ? (closed ? 1 : n - 1) : i + 1;
+    const ds = Math.hypot(samples[nextI].x - samples[prevI].x, samples[nextI].z - samples[prevI].z) * 0.5;
+    const dk = ds > 1e-3 ? (samples[nextI].kappa - samples[prevI].kappa) / ds : 0;
+    samples[i].dkappa = dk > -0.002 && dk < 0.002 ? 0 : dk;
+  }
+  return { samples, closed };
+}
+
+function nearestOnLine(line, x, z) {
+  let best = 0;
+  let bestD = Infinity;
+  const samples = line.samples;
+  for (let i = 0; i < samples.length; i += 1) {
+    const dx = samples[i].x - x;
+    const dz = samples[i].z - z;
+    const d = dx * dx + dz * dz;
+    if (d < bestD) {
+      bestD = d;
+      best = i;
+    }
+  }
+  const s = samples[best];
+  const dx = x - s.x;
+  const dz = z - s.z;
+  return {
+    ...s,
+    dist: Math.sqrt(bestD),
+    /* Positive means the craft is to the right of the direction of travel. */
+    cross: dx * Math.cos(s.heading) + dz * Math.sin(s.heading),
+  };
+}
+
+/* Stick in -1..1 that commands `dps` on this axis, through the firmware curve. */
+export function stickForRate(type, spec, dps) {
+  const sign = dps < 0 ? -1 : 1;
+  const mag = dps < 0 ? -dps : dps;
+  if (!(mag > 0)) {
+    return 0;
+  }
+  const full = angleRateDeg(type, spec, 1);
+  if (mag >= full) {
+    return sign;
+  }
+  let lo = 0;
+  let hi = 1;
+  for (let i = 0; i < 24; i += 1) {
+    const mid = (lo + hi) * 0.5;
+    if (angleRateDeg(type, spec, mid) < mag) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  return sign * (lo + hi) * 0.5;
+}
+
+/*
+ * Roll rate the line asks for, in deg/s. Steady curvature wants none: the
+ * bank is already there and the stick commands rate. Curvature changing is
+ * an entry or an exit, and that is a roll rate.
+ */
+function expectedRollStick(rates, spec, sample, speed) {
+  const v = speed > 0 ? speed : 0;
+  const k = sample.kappa;
+  const u = (v * v * k) / G;
+  const dphiDk = (v * v / G) / (1 + u * u);
+  const rollRad = dphiDk * (v * sample.dkappa);
+  return stickForRate(rates.type, spec, rollRad * RAD2DEG);
+}
+
+function fitFromLine(stats, rates) {
+  const now = normaliseRates(rates);
+  const line = stats.line;
+  const proposal = {
+    type: now.type || 'ACTUAL',
+    throttleCap: now.throttleCap,
+    thrMid: now.thrMid,
+    thrExpo: now.thrExpo,
+  };
+  const notes = {};
+  const total = line.overS + line.underS;
+  const bias = total > 0.4 ? (line.underS - line.overS) / total : 0;
+  for (const axis of RATE_AXES) {
+    const nowAxis = now[axis];
+    if (axis !== 'roll' || !(line.comparedS >= 3)) {
+      proposal[axis] = {
+        rcRate: nowAxis.rcRate,
+        srate: nowAxis.srate,
+        expo: nowAxis.expo,
+      };
+      notes[axis] = axis === 'roll'
+        ? 'Not enough of that lap was on the racing line, so roll stays as it is. Fly the track and it can be read.'
+        : 'This axis is not what the racing line measures, so it stays as it is.';
+      continue;
+    }
+    const a = stats.roll.anchor;
+    /* One stored step per lap. The column only keeps tens of deg/s, so a
+     * smaller nudge is a rate that did not change. The next lap's clock
+     * says whether the step was faster. A rejected step tries the other way. */
+    let delta = 0;
+    if (line.force === 1 || line.force === -1) {
+      delta = line.force;
+    } else if (bias > 0.5) {
+      delta = 1;
+    } else if (bias < -0.5) {
+      delta = -1;
+    }
+    let maxDelta = 0;
+    if (!(line.force === 1 || line.force === -1) && line.satS > 0.4) {
+      maxDelta = 1;
+    }
+    proposal.roll = {
+      rcRate: clamp(nowAxis.rcRate + delta, 1, 200),
+      srate: clamp(nowAxis.srate + maxDelta, 1, 200),
+      expo: nowAxis.expo,
+    };
+    const centreOut = proposal.roll.rcRate * 10;
+    const bits = [];
+    if (bias > 0.05) {
+      bits.push(`You were short of the line more than you over-corrected`
+        + ` (${line.underS.toFixed(1)} s under, ${line.overS.toFixed(1)} s over),`
+        + ` so roll centre goes ${Math.round(a.centreDps)} to ${Math.round(centreOut)} deg/s.`);
+    } else if (bias < -0.05) {
+      bits.push(`You over-corrected more than you were short`
+        + ` (${line.overS.toFixed(1)} s over, ${line.underS.toFixed(1)} s under),`
+        + ` so roll centre goes ${Math.round(a.centreDps)} to ${Math.round(centreOut)} deg/s.`);
+    } else {
+      bits.push(`Over and under corrections were about even`
+        + ` (${line.overS.toFixed(1)} s over, ${line.underS.toFixed(1)} s under),`
+        + ' so roll centre stays.');
+    }
+    if (line.satS > 0.4) {
+      bits.push(`You were on the stop through corners for ${line.satS.toFixed(1)} s,`
+        + ` so full stick goes ${Math.round(a.fullDps)} to ${proposal.roll.srate * 10} deg/s.`);
+    } else {
+      bits.push('You were not held on the stop in the corners, so full stick stays.');
+    }
+    bits.push('Pitch and yaw are not moved by the racing line. Fly this lap and the clock says whether it was faster.');
+    notes.roll = bits.join(' ');
+  }
+  return {
+    rates: normaliseRates(proposal),
+    notes,
+    confidence: confidenceOf(stats),
+    throttle: null,
+  };
+}
+
+function stepToward(current, target, step) {
+  const d = target - current;
+  if (d > step) {
+    return current + step;
+  }
+  if (d < -step) {
+    return current - step;
+  }
+  return target;
+}
+
+/*
+ * One small step toward what THIS lap used. Never the old fit.
+ *
+ * Max rate walks toward the rotation the lap actually reached, plus a little
+ * headroom, at most 20 deg/s a lap. That is how 670 becomes 450 over several
+ * tries instead of 340 in one. Centre walks 10 deg/s toward the corrections:
+ * a hauled stick raises it, a hair-trigger lowers it. Expo comes on 0.05 at
+ * a time when the middle of the stick is where the lap lived, which is what
+ * keeps a higher centre from going sharp. Pitch copies roll when they match.
+ */
+function fitStepped(stats, rates) {
+  const now = normaliseRates(rates);
+  const line = stats.line;
+  const total = line ? line.overS + line.underS : 0;
+  const lineBias = line && total > 0.4
+    ? (line.overS > line.underS ? 'over' : (line.underS > line.overS ? 'under' : 'even'))
+    : null;
+  const proposal = {
+    type: now.type || 'ACTUAL',
+    throttleCap: now.throttleCap,
+    thrMid: now.thrMid,
+    thrExpo: now.thrExpo,
+  };
+  const notes = {};
+  const stepOne = (axis, bias) => {
+    const cur = now[axis];
+    const m = stats[axis];
+    let sr = cur.srate;
+    if (m && m.reach > 80) {
+      const target = clamp(Math.round((m.reach * 1.12) / 10), 1, 200);
+      sr = stepToward(sr, target, 2);
+    }
+    let rc = cur.rcRate;
+    if (bias === 'over' || (bias == null && m && m.corrections > 2 && m.correction > 0 && m.correction < 0.08)) {
+      rc = clamp(rc - 1, 1, 200);
+    } else if (bias === 'under' || (bias == null && m && m.correction > 0.22)) {
+      rc = clamp(rc + 1, 1, 200);
+    }
+    let expo = cur.expo;
+    if (m && m.midShare > 0.4 && expo < 50) {
+      expo = clamp(expo + 5, 0, 50);
+    }
+    return { ...cur, rcRate: rc, srate: sr, expo };
+  };
+  proposal.roll = stepOne('roll', lineBias);
+  proposal.yaw = stepOne('yaw', null);
+  proposal.pitch = pitchMatchesRoll(now) ? { ...proposal.roll } : stepOne('pitch', null);
+  const rcNote = proposal.roll.rcRate - now.roll.rcRate;
+  const srNote = proposal.roll.srate - now.roll.srate;
+  const bits = [];
+  if (lineBias === 'over') {
+    bits.push(`You over-corrected on the line (${line.overS.toFixed(1)} s over, ${line.underS.toFixed(1)} s under).`);
+  } else if (lineBias === 'under') {
+    bits.push(`You were short of the line (${line.underS.toFixed(1)} s under, ${line.overS.toFixed(1)} s over).`);
+  }
+  bits.push(`Roll centre ${now.roll.rcRate * 10} to ${proposal.roll.rcRate * 10},`
+    + ` full stick ${now.roll.srate * 10} to ${proposal.roll.srate * 10}.`);
+  if (rcNote === 0 && srNote === 0 && proposal.roll.expo === now.roll.expo) {
+    bits.push('One lap could not justify a step, so the rates stay.');
+  } else {
+    bits.push('One step only. Fly it, then say if it was sluggish or twitchy.');
+  }
+  notes.roll = bits.join(' ');
+  notes.pitch = pitchMatchesRoll(now)
+    ? 'Pitch stays with roll.'
+    : 'Pitch took its own step from this lap.';
+  notes.yaw = `Yaw centre ${now.yaw.rcRate * 10} to ${proposal.yaw.rcRate * 10},`
+    + ` full stick ${now.yaw.srate * 10} to ${proposal.yaw.srate * 10}.`;
+  return {
+    rates: normaliseRates(proposal),
+    notes,
+    confidence: confidenceOf(stats),
+    throttle: null,
+  };
+}
+
 export function fitRates(stats, rates) {
+  if (stats.line) {
+    return fitFromLine(stats, rates);
+  }
   const now = normaliseRates(rates);
   const proposal = {
     type: 'ACTUAL',
@@ -1082,7 +1445,22 @@ function moveBetween(before, after) {
 export class RateCoach {
   constructor(rates) {
     this.session = new RateSession(rates);
+    /* Set by the shell on a track. A pass then ends when a lap does, not
+     * when the stick has been moving for PASS_MOVE_S. Off in the node
+     * checks, which have no track and still end a pass on stick time. */
+    this.waitForLap = false;
+    this.stepGain = 0.12;
+    this.forceStep = 0;
+    this.lastDelta = 0;
+    this.measureLapMs = 0;
+    this.trialLapMs = 0;
+    this.trialFrom = null;
     this.reset(rates);
+  }
+
+  setLine(points) {
+    this.session.line = buildRacingLine(points);
+    this.session.stepGain = this.stepGain;
   }
 
   reset(rates) {
@@ -1129,6 +1507,12 @@ export class RateCoach {
 
   /* Of the pass in progress, as a fraction, for a progress readout. */
   get passProgress() {
+    /* A lap pass has no stick-time fraction to show. The row says to fly
+     * the lap, and a percentage that hit 100 before the lap ended would be
+     * a progress bar for a finish that had not happened. */
+    if (this.waitForLap) {
+      return 0;
+    }
     return Math.min(1, this.session.moveSeconds / PASS_MOVE_S);
   }
 
@@ -1143,19 +1527,186 @@ export class RateCoach {
    * parks on the ground halfway through does not get a pass taken off the
    * half they flew.
    */
-  push(dtS, stick, gyroDps) {
+  push(dtS, stick, gyroDps, place) {
     if (this.state !== 'measuring') {
       return;
     }
-    this.session.push(dtS, stick, gyroDps);
+    this.session.stepGain = this.stepGain;
+    this.session.push(dtS, stick, gyroDps, place);
+    /* A track pass ends on a lap, not on a timer. Stick time still fills
+     * the histograms. It does not get to change the rates halfway round. */
+    if (this.waitForLap) {
+      return;
+    }
     if (this.session.moveSeconds >= PASS_MOVE_S) {
       this.closePass();
     }
   }
 
+  /*
+   * The shell calls this when the timing gate says the lap is finished.
+   * Nothing else may end a pass that is waiting for one.
+   */
+  /*
+   * A finished lap.
+   *
+   * The first one is the measurement. It proposes rates and the shell puts
+   * them on, then the state is `trial`: the pilot has not felt them yet, so
+   * nothing may ask. The second one was flown ON the new rates. That is the
+   * lap the question is about, and its time against the first lap is the
+   * evidence the change was faster or it was not.
+   *
+   * Returns true when the shell should apply the proposal, and 'ask' when
+   * the shell should ask. false when this lap is not one of those.
+   */
+  lapFinished(lapMs) {
+    if (this.state === 'trial') {
+      this.trialLapMs = lapMs > 0 ? lapMs : 0;
+      return 'ask';
+    }
+    if (!this.waitForLap || this.state !== 'measuring') {
+      return false;
+    }
+    if (!(this.session.moveSeconds > 0)) {
+      return false;
+    }
+    this.measureLapMs = lapMs > 0 ? lapMs : 0;
+    this.session.stepGain = this.stepGain;
+    this.session.forceStep = this.forceStep;
+    this.closePass();
+    this.forceStep = 0;
+    return true;
+  }
+
+  /* The new rates are on the quad. The next lap is the trial, not another
+   * measurement, and the question waits for it. */
+  beginTrial(applied) {
+    this.trialFrom = this.flying;
+    const next = normaliseRates(applied);
+    this.lastDelta = (next.roll.rcRate || 0) - (this.flying.roll.rcRate || 0);
+    this.accept(applied);
+    this.state = 'trial';
+    this.session.reset(this.flying);
+  }
+
+  /* Nothing on the line was worth a change. Stay on this pass's rates and
+   * measure another lap. The step is not shrunk: nothing was tried. */
+  releasePass() {
+    this.waiting = null;
+    this.state = 'measuring';
+    this.session.reset(this.flying);
+  }
+
+  /* The pilot said the new rates were no good. Back to the profile the
+   * trial was flown from, and the next try takes a smaller step because
+   * the last one did not earn its place. */
+  discardPass() {
+    if (this.history.length && this.trialFrom) {
+      this.history.pop();
+      this.pass = Math.max(1, this.pass - 1);
+    }
+    if (this.trialFrom) {
+      this.flying = this.trialFrom;
+    }
+    this.trialFrom = null;
+    this.waiting = null;
+    this.state = 'measuring';
+    this.stepGain = Math.max(0.04, this.stepGain * 0.5);
+    /* The step that was just flown did not earn the lap. The next look
+     * tries one step the other way, and the clock judges that too. */
+    this.forceStep = this.lastDelta > 0 ? -1 : (this.lastDelta < 0 ? 1 : 0);
+    this.session.stepGain = this.stepGain;
+    this.session.forceStep = this.forceStep;
+    this.session.reset(this.flying);
+  }
+
+  /* Same rates, another lap, then the question again. */
+  anotherLap() {
+    this.state = 'trial';
+  }
+
+  /*
+   * One more stored step of roll centre. `dir` is +1 or -1. From the rates
+   * they just flew, so a lap they called a little better is followed by
+   * another step the same way. The lap they just flew becomes the one the
+   * next lap is compared with.
+   */
+  nudge(dir) {
+    const sign = dir < 0 ? -1 : 1;
+    return this.feelNudge({ rc: sign, sr: 0, expo: 0 });
+  }
+
+  /*
+   * The pilot's own word for the lap they just flew.
+   *
+   *   sluggish   the quad would not rotate when they asked. Centre up one
+   *              step (10 deg/s) and full stick up two (20 deg/s).
+   *   twitchy    the stick was too sharp. Full stick down two steps and a
+   *              little expo on, which is how a 670 max walks toward the
+   *              450 they can actually use without going soft in the middle.
+   *
+   * Pitch stays tied to roll when the profile was tied. One answer cannot
+   * halve a rate or double it.
+   */
+  feelNudge(delta) {
+    const next = normaliseRates(this.flying);
+    const linked = pitchMatchesRoll(this.flying);
+    const axes = linked ? ['roll', 'yaw'] : RATE_AXES;
+    for (const axis of axes) {
+      const a = next[axis];
+      a.rcRate = clamp(a.rcRate + (delta.rc || 0), 1, 200);
+      a.srate = clamp(a.srate + (delta.sr || 0), 1, 200);
+      a.expo = clamp(a.expo + (delta.expo || 0), 0, 100);
+    }
+    if (linked) {
+      next.pitch = { ...next.roll };
+    }
+    this.lastFeel = {
+      rc: delta.rc || 0,
+      sr: delta.sr || 0,
+      expo: delta.expo || 0,
+    };
+    this.lastDelta = this.lastFeel.rc || this.lastFeel.sr || 0;
+    this.measureLapMs = this.trialLapMs || this.measureLapMs;
+    this.trialFrom = normaliseRates(this.flying);
+    this.flying = normaliseRates(next);
+    this.state = 'trial';
+    this.session.reset(this.flying);
+    return this.flying;
+  }
+
+  /* The try was the wrong way. Step the other way from the rates before it. */
+  nudgeOtherWay() {
+    const sign = this.lastDelta > 0 ? -1 : 1;
+    const base = normaliseRates(this.trialFrom || this.flying);
+    base.roll.rcRate = clamp(base.roll.rcRate + sign, 1, 200);
+    this.measureLapMs = this.trialLapMs || this.measureLapMs;
+    this.trialFrom = normaliseRates(this.trialFrom || this.flying);
+    this.lastDelta = sign;
+    this.flying = base;
+    this.state = 'trial';
+    this.session.reset(base);
+    return base;
+  }
+
+  /* The pilot flew the new rates and kept them. */
+  keep(applied) {
+    if (this.state !== 'trial' && this.waiting) {
+      this.accept(applied);
+    }
+    this.state = 'done';
+    this.why = 'kept';
+    this.waiting = null;
+    this.trialFrom = null;
+    return this.report();
+  }
+
   closePass() {
     const stats = this.session.stats();
-    const fit = fitRates(stats, this.flying);
+    /* A lap check never uses the old fit. That one could halve the max rate
+     * in a single pass, which is the jump from 670 to 340. A check moves one
+     * stored step toward what the lap actually used. */
+    const fit = this.waitForLap ? fitStepped(stats, this.flying) : fitRates(stats, this.flying);
     const moved = moveBetween(this.flying, fit.rates);
     /* Never on the first pass. One measurement cannot be a trend, and a
      * first pass that happens to propose nothing is a pilot who was already
@@ -1364,10 +1915,16 @@ const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 'es'}`;
 export function passRowValue(read, measuring) {
   switch (passState(read, measuring)) {
     case 'done':
+      if (read.why === 'kept') {
+        return 'Kept';
+      }
       return read.why === 'settled' ? 'Settled' : 'Stopped';
     case 'left':
       return plural(read.passes.length, 'pass');
     case 'measuring':
+      if (read && read.waitForLap) {
+        return read.moveSeconds > 0 ? `Pass ${read.pass}, fly the lap` : 'Fly first';
+      }
       return read && read.moveSeconds > 0
         ? `Pass ${read.pass}, ${Math.round(read.passProgress * 100)}%`
         : 'Fly first';
@@ -1385,6 +1942,10 @@ export function passRowValue(read, measuring) {
 export function passRowNote(read, measuring) {
   switch (passState(read, measuring)) {
     case 'done':
+      if (read.why === 'kept') {
+        return 'You kept these rates. They stay until you change them, and the row below puts back'
+          + ' what you arrived on if you want that instead.';
+      }
       return read.why === 'settled'
         ? `It settled after ${plural(read.passes.length, 'pass')} and you are flying what it found.`
           + ' Open it for the numbers, why each one moved, and the row that puts back what you'
@@ -1395,6 +1956,10 @@ export function passRowNote(read, measuring) {
       return `${plural(read.passes.length, 'pass')} moved your rates before you left the mode. This`
         + ' row stays so you can still see what it did and put back what you arrived on.';
     case 'measuring':
+      if (read && read.waitForLap) {
+        return 'Fly one lap. Your rates stay as they are until that lap is finished, and then you'
+          + ' say whether the new ones are any good.';
+      }
       return read && read.moveSeconds > 0
         ? `Pass ${read.pass} of up to ${read.passLimit}, ${read.moveSeconds.toFixed(0)} seconds of`
           + ' stick movement in. When it fills your rates change and the next pass measures those.'

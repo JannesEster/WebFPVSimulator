@@ -142,4 +142,7 @@ export const MAP_PRELOAD = {
     'maps/built/cars.js',
     'maps/built/ground.js',
   ],
+  ratelab: [
+    'maps/ratelab.js',
+  ],
 };

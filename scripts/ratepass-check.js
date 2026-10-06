@@ -24,11 +24,11 @@
  * most is the one that was false: after a pass lands, `opening` is still
  * the profile the pilot arrived on.
  *
- * WHY IT TAKES A MINUTE. A pass needs PASS_MOVE_S of stick MOVEMENT, 25
- * seconds, and the clock is the simulation's. There is no way to shorten
- * that which is not special casing the test input, so the stick is simply
- * held off centre for the whole run and the check costs what a pass costs.
- * It is not in the cheap set for that reason.
+ * WHY IT DOES NOT WAIT FOR A PASS. A pass ends when a lap does. This stick
+ * program never finishes a lap, on purpose: it only has to prove that stick
+ * time alone does not move the rates, which is the rule the owner set after
+ * a pass landed halfway round the track. The minute it used to spend waiting
+ * for 25 seconds of stick movement was that old rule.
  *
  * This file is part of WebFPVSimulator.
  *
@@ -88,11 +88,12 @@ const SNAP = "(window.__rp = window.__rateMyRates().read, window.__rpSettings = 
 
 const steps = [
   'until:window.__shellReady === true && !!window.__ui',
-  /* The card seats the five inch, sets freestyle and arms the coach. */
+  /* The card seats the five inch and the Rate Lab. The check starts later, from the button. */
   "eval:(window.__ui.act('way-ratemyrates'), window.__ui.screen)",
   'until:window.__boot().frames > 20',
-  'expect:window.__ui.measuring === true',
-  'expect:window.__rateMyRates().armed === true',
+  /* The card seats the track and does not start the check. The button does. */
+  'expect:window.__ui.measuring === false',
+  'expect:window.__rateMyRates().armed === false',
   /* The profile the run opens on, kept to compare the undo target against
    * at the end. This is the assertion the bug broke. */
   "eval:(window.__rpOpening = JSON.stringify(window.__rateMyRates().read.opening), 'kept')",
@@ -102,6 +103,10 @@ const steps = [
    * the world finishes building and the craft is never asked to hold
    * altitude at zero throttle.
    */
+  'until:window.__ui.screen === "flight"',
+  'eval:(document.querySelector(".rate-check").click(), "checking")',
+  'expect:window.__ui.measuring === true',
+  'expect:window.__rateMyRates().armed === true',
   `eval:${DRIVE}`,
   /*
    * WAIT FOR THE INTEGRATOR, NOT FOR FRAMES. The first version of this
@@ -117,38 +122,17 @@ const steps = [
    * measured" rather than "the browser painted something".
    */
   'until:window.__rateMyRates().seconds > 2',
-  /* Then a ladder, chained because one `until` in shots.js gives up after
-   * 20 s and a pass is 25 s of stick movement. The rungs are close enough
-   * together that each is reachable inside one budget at the roughly one
-   * second per second this stick program accrues. */
-  'until:window.__rateMyRates().moveSeconds > 7',
-  'until:window.__rateMyRates().moveSeconds > 15',
-  'until:window.__rateMyRates().moveSeconds > 22',
-  'until:window.__rateMyRates().read.passes.length >= 1',
+  'until:window.__rateMyRates().moveSeconds > 2',
   `eval:${SNAP}`,
 
-  /* THE PASS LANDED AND THE RUN ADVANCED. */
-  'expect:window.__rp.passes.length === 1',
-  'expect:window.__rp.pass === 2',
+  /* NO LAP, SO NOTHING MOVED. A pass that landed here would be the old
+   * timer, which changed the rates halfway round. */
+  'expect:window.__rp.passes.length === 0',
+  'expect:window.__rp.pass === 1',
   'expect:window.__rp.state === "measuring"',
-
-  /*
-   * THE UNDO TARGET DID NOT MOVE. The bug's signature: `reset` was being
-   * called instead of `accept` landing, and `reset` moves `opening` to what
-   * is flying now, so this compared equal to the new rates instead of to
-   * the old ones.
-   */
   'expect:JSON.stringify(window.__rp.opening) === window.__rpOpening',
-
-  /* AND THE PASS REALLY CHANGED THE QUAD. The rates the pass set are on the
-   * settings, are not what the run opened on, and the coach agrees that
-   * they are what is now flying. */
-  'expect:JSON.stringify(window.__rpSettings) !== window.__rpOpening',
-  'expect:JSON.stringify(window.__rp.rates) === JSON.stringify(window.__rpSettings)',
-  'expect:window.__rp.drift.frac > 0',
-
-  /* THE SECOND PASS IS RUNNING, anchored on the new profile, from zero. */
-  'expect:window.__rateMyRates().moveSeconds < 20',
+  'expect:JSON.stringify(window.__rpSettings) === window.__rpOpening',
+  'expect:JSON.stringify(window.__rp.rates) === window.__rpOpening',
   'expect:window.__rateMyRates().armed === true',
 
   /* And the room draws it rather than throwing. */
@@ -169,9 +153,9 @@ try {
     `--out=${out}`,
     '--w=900',
     '--h=560',
-    /* The town, so a freestyle world is already seated: without one the
-     * card lands on the map picker and Fly has nothing to launch. */
-    '--url=/index.html?map=city',
+    /* The Rate Lab, which is the world the card seats. Booting it directly
+     * is the load the card is about to ask for anyway. */
+    '--url=/index.html?map=ratelab',
     '--graphics=high',
     ...steps,
   ], { cwd: root, encoding: 'utf8' });
@@ -219,8 +203,7 @@ try {
       + ` ${realErrors.length} console error(s). The lines above say which.`);
     process.exitCode = 1;
   } else {
-    console.log('\nPASS, a pass landed, it changed the quad, the run advanced to pass two,'
-      + ' and the profile the pilot arrived on is still the undo target');
+    console.log('\nPASS, stick time without a lap left the rates and the undo target where the run opened');
   }
 } finally {
   await rm(out, { recursive: true, force: true });

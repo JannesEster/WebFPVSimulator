@@ -67735,3 +67735,177 @@ passes below it that did not exist. It is `cold` now.
 - The whoop still is not offered, and nothing in the fit is five inch specific.
 - Flight feel is unverified and cannot be verified from here. Whether a settled profile is a profile worth flying is a
   pilot's judgement, and the owner has offered to fly it.
+
+## 2026-10-06 | Rate my Rates | The Rate Lab is a map, a pass returns to the grid, and the feel question follows
+
+### The ask
+
+The owner, after flying the freestyle version: the structured track was missing. The prompt was a track as a map
+option, equal right and left sharp turns, three-gate ladders up and down, spiral ups and downs, then once a pass
+updates the rates put the pilot back on the start line, and thirty seconds later a popup for how it feels. Tuning
+rates in freestyle gives most people no structure.
+
+### The hang, and what it actually was
+
+The track, the generator and the 28 checks were already on the branch. The map had been written and taken back out.
+The note on that night guessed the freshness manifest, because a new lazy map is not in the boot graph. That guess was
+wrong, and the generator's own comment already says a module missing from the list is found the slow way and does not
+break the page.
+
+What hangs is `syncWorld`. `buildFieldScene` names every designed course `custom`. A setting of `ratelab` against a
+view whose id is `custom` never matches, so the shell disposes the world and builds it again, forever. The comment on
+that function already describes the loop for an unknown id. The Rate Lab sets `map.id` to `ratelab` after the build.
+
+### What landed
+
+- `src/maps/ratelab.js` fetches `tracks/json/ratelab.json` and builds the field from it. It does not write the
+  builder's autosave.
+- The registry entry is `ownCourse`, so boot and an airframe change do not replace it with the board's most flown
+  track when the builder's seat is empty. `build-cost.js` has the key `boot.js` checks `?map=` against.
+- The Rate my Rates card seats that map, in race mode, and Fly launches straight into it. The launch card is for a lap
+  that can go on the board. A tuning pass is not one, and a lap flown here is not filed against whatever track happens
+  to be in the builder's seat.
+- A pass that changes the rates calls `reset()`, so the next pass starts on the grid. A manual edit on the Rates
+  screen still re-seats where the craft was. `reset()` re-latches pack voltage from the setting, so every pass starts
+  on a fresh pack of the charge they chose. That is the comparison, taken with the return to the grid.
+- Thirty seconds later the existing "How does it fly?" dialog opens, with the pass in its sentence. It does not set
+  `feelAsked`, so it does not spend the one automatic offer a pilot gets after a race. If another dialog is up it
+  waits, and gives up a minute after it was due. Leaving the mode cancels it.
+
+### Measured
+
+Loaded `http://127.0.0.1:8000/?map=ratelab` in a browser. `__shellReady` true, world id `ratelab`, name Rate Lab, mode
+race, 22 gates, world build 920 ms, first frame 1.37 s, no frame fault. Pressing the card set `measuring` and left the
+world ready. The title row read Track: Rate Lab. Fly reached the flight screen. `npm run lint:preload` up to date,
+256 served, ratelab 1.
+
+Not run: `check:ratepass` (one pass is about a minute of headless flying) and `npm run verify` (no physics, plant,
+module ABI or build change). The return to the grid and the thirty second dialog were not sat through. The owner is
+flying that.
+
+### Still open
+
+- A pass is still 25 seconds of stick movement, and the convergence bands are still the same guesses.
+- The whoop is still not offered. The Rate Lab is a full-size track.
+
+## 2026-10-06 | Rate my Rates | The line comes from posted laps
+
+The owner, after flying the hairpin track: it felt like a guess, and the track was overcomplicated. The track they asked for is a first gate, slalom flags, a triple stack up and then down, a triple corkscrew up, then split-S gates. The line through those should come from other pilots on other tracks, not from a spline invented through the gates.
+
+### What the board actually holds
+
+`GET https://webfpv.org/board/api/tracks` lists 51 tracks. A time's ghost is the craft's scene position and attitude at 30 Hz, plus a split on every gate. It is not the stick. `scripts/line-from-ghosts.js` decodes the fastest ghost and prints the path against the gates.
+
+Read this turn, fastest ghost on each:
+
+- Slalom. "So long, Schlalom!" (`trk-c0600456`), AsylumFPV, 27.80 s, best of 6. Flags 2 m off the lane, clearance 1.5 m, early weave inside about 1.5 m of the straight. Spacing taken from "Flags and cones" (`trk-2397fd92`), Alexulfer, 6.01 s, best of 66, chords about 10 to 12 m. The long slalom's 14 to 16 m pitch does not fit a lap that closes.
+- Triple up, then down. "ladder-up, ladder-down" (`trk-66483691`), Asylum Fpv, 9.13 s. Bottom middle top, then top middle bottom, every pass from the same face. The ghost wraps about 3.6 m out and climbs from under 1 m to about 5 m. Those stacks are 9 m apart. This one uses 12 m so the two wraps do not meet.
+- Corkscrew. The same same-face climb, which is the builder's spiral up. "Corkscrew" (`trk-b3583898`), AsylumFPV, 19.09 s, is single gates 2 m apart and a ghost that loops about 3 m out.
+- Split-S. "Immelman Turn / Hammerhead" (`trk-efee501b`), Crapshack, 4.00 s. Two dive gates, sill 5 m, a 5 m hole, 6 m apart, opposite faces.
+
+### What landed
+
+`scripts/ratelab-track.js` and `tracks/json/ratelab.json` are that sequence, in that order, at those distances. Two waypoints step the return down from the split-S, because one Hermite from 8 m to the first gate went through the floor (lowest sample -0.69 m). The first gate's sill is 1 m so the slalom knots sit where those ghosts flew and the weave does not bow under the grass. The card, the registry note and the Rate my Rates room no longer describe hairpins or a freestyle world.
+
+The rate fit is unchanged. A ghost can say where the fast lap went. It cannot say how much stick that pilot used, so comparing over-corrections and under-corrections against an expected stick is still to do, and it has to be derived from this line rather than from the old centre-target guess.
+
+### Measured
+
+`node scripts/ratelab-check.js`: 25 passed, 0 failed. The builder repairs nothing. The lap closes, 194 m. The derived line stays between 0.22 m and 9.15 m, no warnings.
+
+Loaded `http://127.0.0.1:8000/?map=ratelab`. Shell ready, map id `ratelab`, mode race, 16 gates. World build 897 ms, first frame 323 ms, total 1.36 s.
+
+Not run: `npm run verify`. No physics, plant, module ABI or build change. The rate fit was not touched, so `check:ratemyrates` was not re-run.
+
+## 2026-10-06 | Rate my Rates | The lap, the question, and the builder
+
+The owner flew the slalom and rejected it. Every flag was passed on the right, so the lap was a string of orbits instead of right, left, right. They will build the course themselves. The rates were also changing before a lap was finished, the start said nothing about that, and the feel dialog at the end of a pass asked how the quad flew and then did nothing to the rates.
+
+### What landed
+
+- A pass on the track ends when a lap does. Stick time still fills the measurement. It does not change the rates. `waitForLap` is off in the node checks, which have no gates, so those still end a pass on stick time.
+- On the grid the banner says "Fly one lap and we can see if we need to adjust your rates."
+- When the lap finishes the new rates go on and the craft is back on the grid. The question is "How are your new rates?" with two answers. Yes keeps them and stops. No puts the previous rates back and asks for another lap. It does not file a flight-feel ticket and it does not set `feelAsked`.
+- Rate my Rates room, "Edit the track", opens the shipped course in the builder as a copy. The canvas it replaces is kept in Load. The next Rate Lab build flies that copy when the builder's working track is this course or a remix of `trk-ra7e1ab0`. Any other track in the autosave is left alone.
+
+### Measured
+
+`node scripts/ratemyrates-check.js`: 96 passed, 0 failed. Thirty seconds of stick with `waitForLap` does not end the pass. `lapFinished` does. Discard throws the proposal away. Keep stops the run with why `kept`.
+
+Not run: `scripts/ratepass-check.js` (headless Chromium) and `npm run verify`. The ratepass check was rewritten to the new rule, that stick time without a lap leaves the rates where the run opened, and was not executed. The dialog and the builder door were not clicked.
+
+## 2026-10-06 | Rate my Rates | Learn the track, then the button
+
+The owner saved the course and could not get the check started again. They want to fly the track first. The opening line is "Fly the track and once ready click the button to get your rates checked." The button is bottom right, "Start checking my rates", and it stays on screen while they learn the course. Pressing it is what starts the check. The gate card only seats the track. The Rate Lab skips the launch card so that flight is the next thing they see.
+
+Not run: a browser pass of the button. `node --check` on the shell files is the syntax check. `npm run verify` was not run.
+
+## 2026-10-06 | Rate my Rates | Fly the new rates before anyone asks
+
+The owner finished a lap and was asked how the new rates felt. Those rates had been put on at the end of the lap flown on the old ones. They had not tried them. The adjustment still read as a guess.
+
+### The order
+
+1. One lap on the rates they are flying. That lap is the measurement.
+2. If the racing line says the roll stick was clearly over or under what the line asked for, roll centre moves one stored step. On the stop through a corner, full stick moves one step. Pitch, yaw and expo stay. A lap that matches the line changes nothing.
+3. The new rates go on and they are sent back to the grid. The line on screen is to fly a full lap on them. There is no question yet.
+4. That second lap is the trial. Then the question, and it says whether the trial was faster or slower than the measured lap, in seconds.
+5. Yes keeps them. No puts the old rates back, and the next try steps the other way, because the lap clock rejected the first guess.
+
+The line comparison is roll only. A straight wants a centred stick. A steady corner wants a centred stick too, because the stick commands rate and the bank is already there. Stick the line did not ask for is an over-correction. Missing the entry, or drifting off the line without answering it, is an under-correction.
+
+### Measured
+
+`node scripts/ratemyrates-check.js`: 102 passed, 0 failed. A straight has no curvature. Stick the straight did not ask for drops roll centre one step, 7 to 6. A centred stick does not move it. Finishing the trial returns `ask` and does not propose again.
+
+Not run: `npm run verify`. Not flown. The feel of the step is the pilot's.
+
+## 2026-10-06 | Rate my Rates | Lukewarm answers, rates on screen
+
+The yes or no was too sharp. After a lap on the new rates the question is now three answers. "I'm not sure, do another lap" keeps these rates and asks again after the next lap. "A little better, but not there yet" takes one more step the same way and that lap is the new comparison. "A little worse, try the other way" steps back the other direction from the rates before this try.
+
+The start button sits in the centre column, just above the weight slider, and stays up in the air while the slider fades. Current rates are on screen as Now. Was appears under it once a new set is on.
+
+Not run: a browser pass. `node scripts/ratemyrates-check.js` still 102 passed. `npm run verify` was not run.
+
+## 2026-10-07 | Rate my Rates | Sluggish or twitchy, one step
+
+The owner showed the jump the first lap made: roll 70/670 to 110/340, pitch and yaw max cut to 340 as well. That is the old fit, which can halve full stick in one pass. Flown, 340 felt sluggish. Saying it was worse then threw the change back the other way and it went twitchy. The rates they have found for themselves, Actual, pitch linked to roll: roll and pitch centre 150, max 450, expo 0.35. Yaw centre 170, max 400, expo 0.21.
+
+A lap check no longer uses that fit. Max rate walks toward the rotation the lap actually reached, at most 20 deg/s a try. Centre walks 10 deg/s. Expo walks 0.05 when the lap lived in the middle of the stick. The question after the trial lap is Too sluggish (centre and full stick up one step), Too twitchy (full stick down one step, a little expo on), A little better (the same step again), or I'm not sure, do another lap.
+
+`node scripts/ratemyrates-check.js`: 102 passed. Not flown. `npm run verify` was not run.
+
+## 2026-10-07 | Rate my Rates | Parked for the night
+
+The owner stopped here and will fly it again tomorrow. This entry is the state to resume from. The entries above it describe steps that were replaced the same night. Where they disagree with this one, this one wins.
+
+### Where it is
+
+Branch `cursor/rate-my-rates-mode-e682`, the head of the fork's draft pull request. Local server, if it is still up: `http://127.0.0.1:8000/?map=ratelab`.
+
+### What the pilot does
+
+1. Fly the track and learn it. The grid says to click the button when ready. The button is "Start checking my rates", in the centre, just above the weight slider. It stays up in the air. It is not in the bottom right.
+2. One lap on the current rates. That lap only measures. Rates do not change until it is finished.
+3. A small step goes on and the craft returns to the grid. Fly a full lap on those rates. No question yet.
+4. Then the question, which also says if that lap was faster or slower:
+   - Too sluggish: centre up 10 deg/s, full stick up 20.
+   - Too twitchy: full stick down 20, expo up 0.05.
+   - A little better, but not there yet: the same small step again.
+   - I'm not sure, do another lap: nothing changes.
+5. Now shows the rates being flown, centre and full stick, roll pitch yaw. Was appears under it once a new set is on.
+
+A lap check does not use the old fit. That fit halved full stick in one pass (70/670 became 110/340) and felt sluggish, and reversing it felt twitchy. Max rate now walks toward the rotation the lap reached, at most 20 deg/s a try. Centre walks 10. Expo walks 0.05 when the lap lived in mid stick. Pitch stays with roll while they match.
+
+### The rates the pilot has found
+
+Actual, separate pitch off. Roll and pitch: centre 150, max 450, expo 0.35. Yaw: centre 170, max 400, expo 0.21. Camera angle 40 degrees. Throttle limit off, mid 0.38, expo 0.58. These are the shape a walk of small steps should be able to reach from a twitchy high max and a soft centre. They are not a preset to paste in.
+
+### The track
+
+The generated slalom was rejected: every flag was passed on the right, so it flew as orbits. The owner edited a copy in the builder (Rate my Rates room, Edit the track). The Rate Lab flies that copy when the builder's working track is this course or a remix of `trk-ra7e1ab0`.
+
+### Checks
+
+`node scripts/ratemyrates-check.js`: 102 passed, last run after the sluggish and twitchy step. `scripts/ratepass-check.js` was rewritten for "no lap, no rate change" and for the button, and was not run. `npm run verify` was not run. Nothing in the physics model, the module ABI, or the WASM build was touched.

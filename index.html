@@ -5507,6 +5507,7 @@
       }
       .name-dialog-door:hover { color: var(--cream); }
       .name-dialog-row { display: flex; flex-wrap: wrap; gap: 8px; }
+      .name-dialog-row.rate-choices { flex-direction: column; align-items: stretch; }
       .name-dialog-btn {
         appearance: none; border: 1px solid rgba(244, 236, 214, 0.16);
         background: #121a14; color: var(--slate); font: inherit;
@@ -5656,6 +5657,28 @@
       .pause-chip { top: 52px; }
       .pause-chip[hidden] { display: none; }
       .touch-fly-on .pause-chip { display: none; }
+
+      /*
+       * START CHECKING RATES, in the centre column, just above the weight
+       * slider. The bug chip's absolute corner rule would steal it, so this
+       * puts it back in the column. It stays up in the air: the slider fades
+       * and this does not, because the press happens after they have flown.
+       */
+      .osd-air .rate-check {
+        position: relative; top: auto; right: auto; bottom: auto;
+        transform: none; z-index: 2; pointer-events: auto;
+        margin: 0 0 6px; max-width: 16em;
+        white-space: normal; text-align: center; line-height: 1.3;
+        letter-spacing: 0.03em;
+      }
+      .rate-check[hidden] { display: none; }
+      .osd-rates {
+        pointer-events: none; text-align: center; margin-bottom: 4px;
+        font-size: 12px; font-weight: 600; letter-spacing: 0.03em; line-height: 1.35;
+        color: var(--cream); text-shadow: var(--osd-edge);
+      }
+      .osd-rates-was { color: var(--osd-slate); }
+      .osd-rates[hidden], .osd-rates-was[hidden] { display: none; }
 
       .music-dock.on-flight {
         right: auto; left: 16px; top: 16px;

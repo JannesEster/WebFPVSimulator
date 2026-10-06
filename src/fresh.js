@@ -228,6 +228,7 @@
     'src/maps/custom.js',
     'src/maps/field.js',
     'src/maps/preload.js',
+    'src/maps/ratelab.js',
     'src/maps/registry.js',
     'src/partners/patrons.js',
     'src/partners/roster.js',

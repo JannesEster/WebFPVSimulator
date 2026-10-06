@@ -40,6 +40,11 @@ export const MAP_BUILD_MS = {
    * its own would be pretending to a precision the loading bar does not
    * have. */
   custom: 2964,
+  /* The Rate Lab is the same field with a generated course on it. Same
+   * weight as the track world, for the same reason custom shares the
+   * field's: the terrain is the cost, and a second number would be a
+   * precision the loading bar does not have. */
+  ratelab: 2964,
   city: 7994,
   /* Your map, measured on the starter yard (src/maps/built/starter.js, 47
    * placed assets) at 1280 by 720 on High, as the loading screen's world

@@ -40,7 +40,7 @@
  */
 
 import {
-  PASS_LIMIT, RateCoach, RateSession, SESSION_GOOD_S, SESSION_THIN_S, fitRates,
+  PASS_LIMIT, RateCoach, RateSession, SESSION_GOOD_S, SESSION_THIN_S, buildRacingLine, fitRates,
   passRowNote, passRowValue, passState,
 } from '../src/fc/ratemyrates.js';
 import {
@@ -993,7 +993,7 @@ check('reset, for a new run, does move the undo target',
 console.log('\n the four states a run can be in');
 const readOf = ({
   state = 'measuring', why = '', passes = 0, pass = 1, moveSeconds = 0,
-  passProgress = 0, armed = true,
+  passProgress = 0, armed = true, waitForLap = false,
 }) => ({
   state,
   why,
@@ -1002,6 +1002,7 @@ const readOf = ({
   armed,
   moveSeconds,
   passProgress,
+  waitForLap,
   passes: Array.from({ length: passes }, (_, i) => ({ pass: i + 1, rates: STOCK })),
   opening: STOCK,
   rates: STOCK,
@@ -1030,6 +1031,79 @@ check('passes behind it and no longer watching is left',
 check('abandoned inside the first pass is cold, not left: it applied nothing',
   passState(readOf({ passes: 0, moveSeconds: 18, armed: false }), false) === 'cold');
 
+console.log('\n the racing line, not a target guessed in advance');
+{
+  const straight = [];
+  for (let i = 0; i < 40; i += 1) {
+    straight.push({ x: i * 2, z: 0 });
+  }
+  const line = buildRacingLine(straight);
+  check('a straight has almost no curvature',
+    line.samples.every((s) => s.kappa > -0.02 && s.kappa < 0.02),
+    `worst ${Math.max(...line.samples.map((s) => Math.abs(s.kappa))).toFixed(4)}`);
+  const wobble = new RateCoach(STOCK);
+  wobble.waitForLap = true;
+  wobble.setLine(straight);
+  const place = { x: 20, z: 0, speed: 15 };
+  const stick = { roll: 0.35, pitch: 0, yaw: 0 };
+  const gyro = { roll: 40, pitch: 0, yaw: 0 };
+  for (let i = 0; i < 8; i += 1) {
+    wobble.push(1, stick, gyro, place);
+  }
+  wobble.lapFinished(50000);
+  const dropped = wobble.pending();
+  check('stick the straight did not ask for lowers roll centre',
+    dropped && dropped.rates.roll.rcRate < STOCK.roll.rcRate,
+    dropped ? `${STOCK.roll.rcRate} to ${dropped.rates.roll.rcRate}` : 'no pass');
+  check('and it says the over-correction it counted',
+    dropped && /over-corrected/.test(dropped.notes.roll),
+    dropped ? dropped.notes.roll.slice(0, 80) : 'no note');
+
+  const held = new RateCoach(STOCK);
+  held.waitForLap = true;
+  held.setLine(straight);
+  const quiet = { roll: 0.03, pitch: 0, yaw: 0 };
+  for (let i = 0; i < 8; i += 1) {
+    held.push(1, quiet, gyro, place);
+  }
+  held.lapFinished(48000);
+  const same = held.pending();
+  check('a centred stick on the straight does not move roll',
+    same && same.rates.roll.rcRate === STOCK.roll.rcRate,
+    same ? `${same.rates.roll.rcRate}` : 'no pass');
+
+  /* The proposal is flown before anyone is asked. The second lap is the trial. */
+  held.beginTrial(same.rates);
+  check('the trial is not another proposal', held.pending() === null && held.state === 'trial');
+  check('finishing the trial asks instead of changing the rates again',
+    held.lapFinished(46000) === 'ask' && held.trialLapMs === 46000);
+}
+
+console.log('\n a lap is what ends a pass when the track asks for one');
+{
+  const lapCoach = new RateCoach(STOCK);
+  lapCoach.waitForLap = true;
+  const stick = { roll: 0.2, pitch: 0, yaw: 0 };
+  const gyro = { roll: 0, pitch: 0, yaw: 0 };
+  for (let i = 0; i < 30; i += 1) {
+    lapCoach.push(1, stick, gyro);
+  }
+  check('thirty seconds of stick does not change rates before the lap',
+    lapCoach.pending() === null && lapCoach.state === 'measuring');
+  check('finishing the lap ends the pass',
+    lapCoach.lapFinished() === true && lapCoach.pending() !== null);
+  const proposed = lapCoach.pending().rates;
+  lapCoach.discardPass();
+  check('no throws that proposal away and measures the same rates again',
+    lapCoach.pending() === null && lapCoach.state === 'measuring' && lapCoach.pass === 1);
+  lapCoach.push(1, stick, gyro);
+  check('another lap can be finished', lapCoach.lapFinished() === true);
+  const kept = lapCoach.keep(proposed);
+  check('yes keeps the rates and stops',
+    kept && kept.state === 'done' && kept.why === 'kept' && kept.passes.length === 1,
+    kept ? `${kept.state} ${kept.why} ${kept.passes.length}` : 'no report');
+}
+
 console.log('\n and what each one says');
 const saysBoth = (what, read, measuring, mustHave) => {
   const v = passRowValue(read, measuring);
@@ -1039,6 +1113,12 @@ const saysBoth = (what, read, measuring, mustHave) => {
 };
 saysBoth('cold invites the pilot to start', readOf({ passes: 0, armed: false }), false,
   ['fly first', 'front screen']);
+saysBoth('a lap pass tells the pilot to fly the lap rather than quoting a percentage',
+  readOf({ waitForLap: true, moveSeconds: 12, pass: 1 }), true,
+  ['fly the lap', 'until that lap is finished']);
+saysBoth('keeping the rates says they were kept',
+  readOf({ state: 'done', why: 'kept', passes: 1 }), true,
+  ['kept', 'you kept these rates']);
 saysBoth('measuring before anything is flown says so rather than showing a pass',
   readOf({ moveSeconds: 0 }), true, ['fly first', 'nothing measured yet']);
 saysBoth('measuring mid pass names the pass and how far in it is',
