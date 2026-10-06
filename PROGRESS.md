@@ -66816,6 +66816,100 @@ Two goes at it, and both are the same lesson in different clothes.
   checked against both saved logs: the good run reads 0 steps, 0 real errors, 3 ignored; the buggy run reads 5 steps, 0
   real errors, 3 ignored.
 
+## 2026-10-06 | tracks | The Rate Lab, and a map option that is not wired yet
+
+### The ask
+
+The owner flew the freestyle version and named the hole in it: "trying to tune rates in freestyle gives most peopl no
+structure". They asked for a track with "equil right and left sharp turns something with 3 gate ladder ups and downs and
+spiral ups and spiral downs", for the craft to be returned to the start when a pass applies, and for a feedback dialog
+thirty seconds later.
+
+They are right, and the reason is worse than comfort. The fit compares each pass against the last, so two passes are
+only comparable if they measured the same KIND of flying. A pilot who hovered through pass one and chased rooftops
+through pass two has handed the loop two different pilots, and the loop cannot tell that from a pilot whose hands
+changed.
+
+### What landed: the track
+
+`scripts/ratelab-track.js` generates `tracks/json/ratelab.json`, and `scripts/ratelab-check.js` (28 checks,
+`npm run check:ratelab`) pins its geometry. Generated rather than drawn because the track is a measuring instrument, so
+its properties have to be exact rather than approximately what somebody dragged into place.
+
+All three features, by name: a hairpin round a flag on each side, exact reflections about the centre line, flown round
+opposite sides; two three gate ladders, each flown through all three openings with the entry direction alternating,
+which is a vertical zigzag and gives pitch and throttle reversals at a fixed amplitude; and a spiral up and a spiral
+down, four gates round an arc with the sill climbing a level at a time. Derives to a closed 298 m lap, no warnings, line
+between 0.76 and 5.88 m.
+
+Flying gates are lifted by `sillH` and stand on the ground at `z` of zero, which is the schema's "nothing floats" rule;
+only the four waypoints are in the air, which is the one thing that rule leaves alone.
+
+**On the licence, since it has been the spine of this work.** RateFinder's licence reserves its "calibration exercise
+designs". This is not one: its exercises are timed instructions to a pilot, six per discipline, and this is a race track
+made of gate ladders, hairpins and spirals, which are standard elements present in every track builder including this
+repository's own, and which this repository already imports from Velocidrone files. The pilot is still asked to perform
+no drill: they fly laps.
+
+### What the check caught before the track was committed
+
+- **The generator overclaimed.** Its header said the whole track was a reflection about the centre line. It cannot be: a
+  helix that climbs as it sweeps across has a low end and a high end, so its reflection has them the other way round and
+  is a different helix. The check reported four gates paired with sills of 0 against 4.67, which is that fact arriving.
+  What the spirals are instead is the SAME helix twice, same x and same sills, offset down the field, flown climbing and
+  descending, which is the property that was actually wanted. The comment and the document's credit note say that now.
+- **Then it reported the hairpins asymmetric when they are not**, and that one was the check's fault. Reflecting a
+  hairpin swaps which of its two gates you reach first, so the mirror of the left ENTRY gate is the right EXIT gate. The
+  names follow the flying order and the geometry follows the reflection, and the two disagree by design. It pairs by
+  position now.
+
+### What did NOT land: the map option, and why it was taken back out
+
+The track is reachable by nothing yet. A map option was written and then reverted, because it hung the shell.
+
+Four touchpoints were found and fixed on the way, and they are worth recording because the next person adding a map
+needs all of them:
+
+- `src/maps/registry.js` needs the entry, which is the obvious one.
+- `src/maps/build-cost.js` needs a KEY, because `src/boot.js` validates `?map=` against the keys of that object before
+  any module has loaded. Without it the address was honoured and the pilot got the field, silently, because falling back
+  is what that line is for.
+- `src/main.js` adopts the board's most flown track when a race map has none seated, which is right for Track and wrong
+  for a map that carries its own document. An `ownCourse` flag was added for that.
+- The map module itself injects its document through the hook `src/maps/custom.js` already has, deliberately NOT by
+  writing into the builder's autosave, because that is where a pilot's unsaved work lives and a tuning mode that
+  replaced the track somebody was halfway through building would be unforgivable.
+
+With all four in place the map still hung. One experiment settled where the fault is NOT: the same
+`tracks/json/ratelab.json` loaded through the existing `--course=` path, which uses no new code, builds in twelve
+seconds and reaches 22 frames. So the track's geometry is fine and the fault is in the wiring. Two runs of the new map
+disagreed with each other, one reaching "Building the world, step 2 of 3" with `__shellReady` true and a later one never
+setting `__shellReady` at all, which smells like a race rather than a missing manifest entry. Not diagnosed.
+
+So it is reverted rather than committed. A map option that hangs boot is worse than no map option, and guessing at it
+with hundred second experiments was not worth more of the night. The track, the generator and the 28 checks are
+committed and good; `src/maps/ratelab.js` is in this entry's history only.
+
+### What went wrong
+
+- **`src/fresh.js` was left stale by my own earlier commits.** `src/fc/ratemyrates.js` is imported by main.js and ui.js,
+  so it is in the boot graph and belongs in the freshness manifest, and `npm run lint:preload` had been reporting STALE
+  since the first Rate my Rates commit. I had not run it, because it is not in the cheap set this repository names,
+  which is exactly why a new module in the boot graph needs saying out loud. Regenerated. It also picked up
+  `src/share/supportprompt.js`, stale from an earlier commit on main rather than from this branch.
+- Checked whether the staleness was mine by stashing and re-running on the committed tree, rather than assuming either
+  way.
+
+### Still to do, and the order it wants
+
+1. The map option, which is the blocker for everything else: diagnose the hang.
+2. The card seats the Rate Lab instead of freestyle, which is a two line change once the map works.
+3. Back to the start line when a pass applies. The craft is currently re-seated where it was, deliberately, by
+   `reseatAfterConfigSwap`; the owner wants the opposite, and they are right, because a pass flown from the same place
+   as the last one is the comparison the loop is making.
+4. A feedback dialog thirty seconds after that, which wants `askForm` and probably belongs beside the existing feel
+   report in `src/share/bugs.js` rather than as a new kind of thing.
+
 ### Still open
 
 - A pass is 25 seconds of stick movement, which is a guess. Too short and a pass measures noise, too long and nothing
