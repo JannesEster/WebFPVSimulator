@@ -1300,6 +1300,112 @@ export class RateCoach {
   }
 }
 
+/*
+ * ============================================================
+ * WHAT STATE A RUN IS IN, AND WHAT TO SAY ABOUT IT
+ * ============================================================
+ *
+ * WHY THIS IS HERE AND NOT IN THE SHELL. It was in the shell, as two
+ * functions inside src/ui/ui.js, and the upstream owner's condition for a
+ * contribution is that every edit is covered by unit tests. These could not
+ * be: they sat unexported in the middle of a seventeen thousand line module
+ * that the shell builds its screens from.
+ *
+ * They belong here anyway, and the repository already says so: `ratesSummary`,
+ * `ratesShort` and `throttleSummary` are pilot-facing display strings living
+ * in configs/rates.js beside the rate profile they describe. A sentence about
+ * what a run is doing is a fact about the run.
+ *
+ * FOUR STATES, AND THEY ARE NOT THE SAME THING. This is worth a function of
+ * its own because getting it wrong is easy and I did: the first version had
+ * three, and a run the pilot had WALKED AWAY FROM read as one still in
+ * progress. The room showed "Pass 2 of up to 6, 40 percent" for something
+ * nothing was advancing, and the title row vanished entirely, which took the
+ * undo with it. See the trap closed in PROGRESS.md 2026-10-05.
+ *
+ *   'cold'       nothing measured and nothing watching. There is no run.
+ *   'measuring'  a pass is filling. The only state where time is passing.
+ *   'left'       passes landed and then the pilot pressed another card. The
+ *                rates they moved are still on the quad, so the undo has to
+ *                stay reachable even though nothing is being measured.
+ *   'done'       the loop stopped, and `why` says which of its three endings
+ *                it was.
+ */
+export function passState(read, measuring) {
+  if (!read) {
+    return measuring ? 'measuring' : 'cold';
+  }
+  /* Checked before `measuring`, because the two coexist: the loop finishing
+   * does not disarm the mode, so a settled run is still armed until the
+   * pilot presses another card. */
+  if (read.state === 'done') {
+    return 'done';
+  }
+  if (measuring) {
+    return 'measuring';
+  }
+  /*
+   * Not measuring, so the pilot has left. Whether that matters depends on
+   * whether the run got as far as APPLYING anything: a run with passes
+   * behind it has moved the rates on the quad and the undo has to stay
+   * reachable, and a run abandoned inside its first pass has touched
+   * nothing, so there is no trace of it and nothing to say. Calling the
+   * second one 'left' put "Run left unfinished, 0 passes" on screen over a
+   * note promising passes below it that did not exist.
+   */
+  return read.passes && read.passes.length ? 'left' : 'cold';
+}
+
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 'es'}`;
+
+/* The value column of the row that opens the room: short enough for a menu
+ * row, and different in all four states, because a row that read the same
+ * whether a run was filling or finished would be furniture. */
+export function passRowValue(read, measuring) {
+  switch (passState(read, measuring)) {
+    case 'done':
+      return read.why === 'settled' ? 'Settled' : 'Stopped';
+    case 'left':
+      return plural(read.passes.length, 'pass');
+    case 'measuring':
+      return read && read.moveSeconds > 0
+        ? `Pass ${read.pass}, ${Math.round(read.passProgress * 100)}%`
+        : 'Fly first';
+    default:
+      return 'Fly first';
+  }
+}
+
+/*
+ * And the sentence under it. Each state tells the pilot a different thing to
+ * do, which is the whole reason the states are distinguished: settling means
+ * stop, stopping means run it again, leaving means the undo is still there,
+ * and measuring means keep flying.
+ */
+export function passRowNote(read, measuring) {
+  switch (passState(read, measuring)) {
+    case 'done':
+      return read.why === 'settled'
+        ? `It settled after ${plural(read.passes.length, 'pass')} and you are flying what it found.`
+          + ' Open it for the numbers, why each one moved, and the row that puts back what you'
+          + ' arrived on.'
+        : `It stopped after ${plural(read.passes.length, 'pass')} without settling. Open it for what`
+          + ' it found, why it stopped, and the row that puts back what you arrived on.';
+    case 'left':
+      return `${plural(read.passes.length, 'pass')} moved your rates before you left the mode. This`
+        + ' row stays so you can still see what it did and put back what you arrived on.';
+    case 'measuring':
+      return read && read.moveSeconds > 0
+        ? `Pass ${read.pass} of up to ${read.passLimit}, ${read.moveSeconds.toFixed(0)} seconds of`
+          + ' stick movement in. When it fills your rates change and the next pass measures those.'
+        : 'Watching, and nothing measured yet. Fly how you normally fly: hover and hold a line, then'
+          + ' commit to some real moves. It refines your rates a pass at a time as you go.';
+    default:
+      return 'Press Rate my Rates on the front screen and fly how you normally fly. It refines your'
+        + ' rates a pass at a time as you go.';
+  }
+}
+
 function overDrift(opening, after) {
   const a = endpointsOf(opening);
   const b = endpointsOf(after);

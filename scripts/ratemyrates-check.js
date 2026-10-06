@@ -41,6 +41,7 @@
 
 import {
   PASS_LIMIT, RateCoach, RateSession, SESSION_GOOD_S, SESSION_THIN_S, fitRates,
+  passRowNote, passRowValue, passState,
 } from '../src/fc/ratemyrates.js';
 import {
   RATE_AXES, RATE_DEFAULTS, fullStickDeg, normaliseRates, ratesDiff, ratesShort,
@@ -971,6 +972,105 @@ check('which is not what the last pass set', ratesDiff(nudged) !== afterOne);
 midRun.reset(nudged);
 check('reset, for a new run, does move the undo target',
   ratesDiff(midRun.opening) === ratesDiff(nudged) && midRun.history.length === 0 && midRun.pass === 1);
+
+/*
+ * ============================================================
+ * THE FOUR STATES A RUN CAN BE IN, AND WHAT IS SAID ABOUT THEM
+ * ============================================================
+ *
+ * These were two unexported functions inside src/ui/ui.js and could not be
+ * tested there. They are here now, which is where the repository already
+ * keeps pilot-facing display strings for a domain concept, and this is the
+ * coverage the upstream owner asked for as the condition of a contribution.
+ *
+ * It is coverage worth having rather than coverage for its own sake: the
+ * first version of this logic had THREE states, and a run the pilot had
+ * walked away from read as one still in progress. The room said "Pass 2 of
+ * up to 6, 40 percent" about something nothing was advancing, and the title
+ * row disappeared, which took the only route to the undo with it. Every
+ * assertion below is one of the ways that went wrong.
+ */
+console.log('\n the four states a run can be in');
+const readOf = ({
+  state = 'measuring', why = '', passes = 0, pass = 1, moveSeconds = 0,
+  passProgress = 0, armed = true,
+}) => ({
+  state,
+  why,
+  pass,
+  passLimit: PASS_LIMIT,
+  armed,
+  moveSeconds,
+  passProgress,
+  passes: Array.from({ length: passes }, (_, i) => ({ pass: i + 1, rates: STOCK })),
+  opening: STOCK,
+  rates: STOCK,
+  drift: { frac: 0, expo: 0 },
+  live: null,
+});
+
+check('no probe and nothing watching is cold', passState(null, false) === 'cold');
+check('no probe but watching is already measuring, not cold',
+  passState(null, true) === 'measuring');
+check('watching with nothing flown yet is measuring',
+  passState(readOf({ moveSeconds: 0 }), true) === 'measuring');
+check('watching with a pass part flown is measuring',
+  passState(readOf({ moveSeconds: 12 }), true) === 'measuring');
+check('a finished run is done even though the mode is still armed',
+  passState(readOf({ state: 'done', why: 'settled', passes: 2 }), true) === 'done',
+  'the loop finishing does not disarm the mode');
+check('passes behind it and no longer watching is left',
+  passState(readOf({ passes: 2, armed: false }), false) === 'left');
+/*
+ * AND THE ONE THAT WAS WRONG. A run abandoned inside its first pass has
+ * applied nothing, so there is no trace of it on the quad and nothing to
+ * undo. Reading it as 'left' put "Run left unfinished, 0 passes" on screen
+ * above a note promising passes below it that did not exist.
+ */
+check('abandoned inside the first pass is cold, not left: it applied nothing',
+  passState(readOf({ passes: 0, moveSeconds: 18, armed: false }), false) === 'cold');
+
+console.log('\n and what each one says');
+const saysBoth = (what, read, measuring, mustHave) => {
+  const v = passRowValue(read, measuring);
+  const n = passRowNote(read, measuring);
+  const ok = mustHave.every((s) => `${v} ${n}`.toLowerCase().includes(s.toLowerCase()));
+  check(what, ok && v.length > 0 && n.length > 20, `"${v}" / "${n.slice(0, 60)}..."`);
+};
+saysBoth('cold invites the pilot to start', readOf({ passes: 0, armed: false }), false,
+  ['fly first', 'front screen']);
+saysBoth('measuring before anything is flown says so rather than showing a pass',
+  readOf({ moveSeconds: 0 }), true, ['fly first', 'nothing measured yet']);
+saysBoth('measuring mid pass names the pass and how far in it is',
+  readOf({ pass: 2, moveSeconds: 12, passProgress: 0.48 }), true,
+  ['pass 2', '48%', '12 seconds']);
+saysBoth('settled says settled and points at the undo',
+  readOf({ state: 'done', why: 'settled', passes: 3 }), true,
+  ['settled', '3 passes', 'puts back what you arrived on']);
+saysBoth('stopped says it did not settle, which wants the opposite of settling',
+  readOf({ state: 'done', why: 'limit', passes: 6 }), true,
+  ['stopped', 'without settling']);
+saysBoth('left says the rates moved and the undo is still there',
+  readOf({ passes: 2, armed: false }), false,
+  ['2 passes', 'left the mode', 'put back what you arrived on']);
+check('one pass is not "1 passes"',
+  passRowValue(readOf({ passes: 1, armed: false }), false) === '1 pass',
+  passRowValue(readOf({ passes: 1, armed: false }), false));
+/* Nothing may throw on a half built probe: the room renders on a frame the
+ * pilot opened it on, and a probe read between a reset and the first push
+ * has no passes array at all. */
+let threw = null;
+for (const [r, m] of [[null, false], [null, true], [{}, false], [{}, true],
+  [{ passes: [] }, true], [{ state: 'done', why: '', passes: [] }, false]]) {
+  try {
+    passState(r, m);
+    passRowValue(r, m);
+    passRowNote(r, m);
+  } catch (e) {
+    threw = `${JSON.stringify(r)} ${m}: ${e.message}`;
+  }
+}
+check('a half built or empty probe reads without throwing', threw === null, threw || 'six shapes');
 
 console.log(failed ? `\n${failed} failed, ${passed} passed` : `\nall ${passed} passed`);
 for (const f of fails) {

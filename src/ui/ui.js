@@ -93,7 +93,9 @@ import {
   throttleSummary,
 } from '../../configs/rates.js';
 import { angleRateDeg } from '../fc/ratescurve.js';
-import { SESSION_GOOD_S, SESSION_THIN_S } from '../fc/ratemyrates.js';
+import {
+  SESSION_GOOD_S, SESSION_THIN_S, passRowNote, passRowValue, passState,
+} from '../fc/ratemyrates.js';
 import {
   PRESET_NAME_MAX,
   RATES_STORAGE_WARNING,
@@ -4296,48 +4298,6 @@ const BUILDER_CARD = {
  * on and what a menu that has been backed out of returns to. The mode is
  * only set once the gate has been answered, so before that the racing card
  * of the seated aircraft is the standing answer. */
-/*
- * The title's Rate my Rates row, in words.
- *
- * Four states and they are genuinely different things to say: watching but
- * nothing flown yet, a pass in progress, a run that finished, and a run
- * that finished after the pilot left the mode, which is the one where the
- * row is only still there so the undo is reachable.
- */
-function rateRowValue(measuring, read) {
-  if (!read) {
-    return 'Fly first';
-  }
-  if (read.state === 'done') {
-    return read.why === 'settled' ? 'Settled' : 'Stopped';
-  }
-  if (!measuring) {
-    return `${read.passes.length} pass${read.passes.length === 1 ? '' : 'es'}`;
-  }
-  return read.moveSeconds > 0 ? `Pass ${read.pass}, ${Math.round(read.passProgress * 100)}%` : 'Fly first';
-}
-
-function rateRowNote(measuring, read) {
-  if (!read || (!read.passes.length && !(read.moveSeconds > 0))) {
-    return 'Watching, and nothing measured yet. Fly how you normally fly: hover and hold a line, '
-      + 'then commit to some real moves. It refines your rates a pass at a time as you go.';
-  }
-  if (read.state === 'done') {
-    return read.why === 'settled'
-      ? `It settled after ${read.passes.length} passes and you are flying what it found. Open it for `
-        + 'the numbers, why each one moved, and the row that puts back what you arrived on.'
-      : `It stopped after ${read.passes.length} passes without settling. Open it for what it found, `
-        + 'why it stopped, and the row that puts back what you arrived on.';
-  }
-  if (!measuring) {
-    return `${read.passes.length} pass${read.passes.length === 1 ? '' : 'es'} moved your rates before `
-      + 'you left the mode. This row stays so you can still see what it did and put back what you '
-      + 'arrived on.';
-  }
-  return `Pass ${read.pass} of up to ${read.passLimit}, ${read.moveSeconds.toFixed(0)} seconds of stick `
-    + 'movement in. When it fills your rates change and the next pass measures those.';
-}
-
 /* The ways a pilot can be SEATED on, which is every way that is not a
  * measuring one: see the `measure` note in WAYS for why the cursor must
  * never open on that card. */
@@ -7683,9 +7643,9 @@ export class Ui {
       const rateRow = (this.measuring || ranSomething)
         ? [{
           label: SCREEN_TITLES.ratemyrates,
-          value: rateRowValue(this.measuring, measured),
+          value: passRowValue(measured, this.measuring),
           action: 'ratemyrates',
-          note: rateRowNote(this.measuring, measured),
+          note: passRowNote(measured, this.measuring),
         }]
         : [];
       return [
@@ -9038,7 +8998,12 @@ export class Ui {
     if (this.screen === 'ratemyrates') {
       const read = this.rateProbe ? this.rateProbe() : null;
       const back = { label: 'Back', action: 'back' };
-      if (!read || (!read.armed && read.passes.length === 0)) {
+      /* ONE DEFINITION OF WHAT STATE THE RUN IS IN, in src/fc/ratemyrates.js,
+       * shared with the title row and unit tested there. The room used to
+       * work it out again from `read.state` and `read.armed`, and the two
+       * copies disagreed: see the `left` state in that file. */
+      const state = passState(read, read ? read.armed : false);
+      if (state === 'cold') {
         return [
           {
             label: 'Nothing measured yet',
@@ -9057,7 +9022,7 @@ export class Ui {
           back,
         ];
       }
-      const done = read.state === 'done';
+      const done = state === 'done';
       /*
        * THE PASS TABLE, which is the whole story of the run in one column.
        *
@@ -9096,7 +9061,7 @@ export class Ui {
        * passes that already landed are still on their quad and the undo is
        * still the thing they are most likely here for.
        */
-      const left = !read.armed && !done;
+      const left = state === 'left';
       const headRow = left
         ? {
           label: 'Run left unfinished',
